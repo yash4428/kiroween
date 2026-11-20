@@ -1,0 +1,9 @@
+# never ignore .kiro/ — it is part of the submission
+.DS_Store
+app/.build/
+app/.swiftpm/
+backend/node_modules/
+backend/.env
+backend/yolo-service/__pycache__/
+backend/yolo-service/*.pt
+*.log

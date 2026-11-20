@@ -1,0 +1,1156 @@
+/**
+ * Provider-agnostic prompt text, output contracts, and normalization.
+ *
+ * This is the single source of truth for what shape /plan, /vision etc. return.
+ * Both providers/bedrock.js and providers/gemini.js call the model with the
+ * prompts defined here and run the response through the same validators, so
+ * swapping AI_PROVIDER can never change the JSON the Android app parses.
+ */
+
+/** Strips markdown code fences from a model response. */
+function stripFences(text) {
+  return text
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/```\s*$/i, '')
+    .replace(/```json\n?/g, '')
+    .replace(/```\n?/g, '')
+    .trim();
+}
+
+/**
+ * Known Android packages for common apps. Steps are enriched with an
+ * `appPackage` field server-side (deterministic — more reliable than asking
+ * the model for package names in 10 languages).
+ */
+const KNOWN_PACKAGES = {
+  'youtube': 'com.google.android.youtube',
+  'whatsapp': 'com.whatsapp',
+  'phonepe': 'com.phonepe.app',
+  'play store': 'com.android.vending',
+  'playstore': 'com.android.vending',
+  'chrome': 'com.android.chrome',
+  'maps': 'com.google.android.apps.maps',
+  'instagram': 'com.instagram.android',
+  'settings': 'com.android.settings',
+  'gmail': 'com.google.android.gm',
+  'irctc': 'cris.org.in.prs.ima',
+  'paytm': 'net.one97.paytm',
+  'facebook': 'com.facebook.katana',
+  'telegram': 'org.telegram.messenger',
+};
+
+/** Resolve an app name (or any text mentioning one) to a known package. */
+function resolveAppPackage(text) {
+  if (!text) return null;
+  const haystack = String(text).toLowerCase();
+  for (const [keyword, pkg] of Object.entries(KNOWN_PACKAGES)) {
+    if (haystack.includes(keyword)) return pkg;
+  }
+  return null;
+}
+
+// ── Android enriched planner (POST /plan, mobile) ──────────────────────────
+// The Android Step model expects, at minimum: index, instruction, findDescription.
+// This module returns { appPackage, appName, steps: [{ stepNumber, instruction,
+// findDescription, ... }] } — index.js maps stepNumber-based fields through
+// unchanged, so the wire shape below IS the Android contract. Do not rename
+// these fields without updating the Android Step model.
+
+const ENRICHED_SYSTEM_PROMPT = `You are Waylo's step planner. You generate step-by-step guides for elderly Indian users navigating Android smartphones — many are using a touchscreen for the first time.
+
+Your output must be ONLY valid JSON. No explanation, no markdown, no preamble.
+
+RESPONSE FORMAT:
+{
+  "task": "original task string",
+  "appPackage": "com.example.app",
+  "appName": "App Name",
+  "steps": [
+    {
+      "stepNumber": 1,
+      "instruction": "Simple English instruction, max 14 words, says WHERE in plain words",
+      "findDescription": "short element description for search, 3-6 words lowercase",
+      "elementType": "one of the element type enum values",
+      "screenRegion": "one of the screen region enum values",
+      "visualDescription": "what it looks like: color shape icon text, max 15 words",
+      "alternateLabels": ["label1", "label2"],
+      "fallbackHint": "what to do if element not visible on screen",
+      "parentContainer": "UI container name"
+    }
+  ]
+}
+
+ELEMENT TYPE ENUM (use exactly): BUTTON, ICON_BUTTON, FAB, TEXT_INPUT, NAV_ITEM, TOGGLE, APP_ICON, LIST_ITEM, IMAGE, TAB, OVERFLOW_MENU, BACK_BUTTON, OTHER
+
+SCREEN REGION ENUM (use exactly): top, top_center, bottom, bottom_right, center, left, right, full
+
+IMPORTANT ARCHITECTURE FACT: the app finds every step's target purely by searching the
+CURRENT screen for "findDescription" (+ alternateLabels + visualDescription). There is
+no "just speak this, no target" step — every step MUST describe something real and
+visible to look for, or the app wastes time searching for nothing and falls back to a
+slow, costly AI vision call. This is why "swipe up" is folded into step 1 below instead
+of being its own targetless step.
+
+GRANULARITY — one physical action per step:
+- Each step is exactly one tap, one swipe-then-tap (step 1 only, see below), or one
+  text-entry action. Never combine two unrelated taps into one step.
+- Typing text is its OWN step, separate from tapping the field that opens the keyboard.
+- Submitting (tapping a search/send/confirm button) is its OWN step, separate from typing.
+
+STEP 1 IS SPECIAL — this is the ONLY step whose instruction must NOT bake in a
+gesture ("swipe up", "swipe left") OR a location. The PHONE decides how to open
+the app at run time: if the app's icon is already visible it drops the on-screen
+dot straight on it; if not, it walks the user into the app drawer and search,
+adapting to whatever gesture that particular launcher actually uses. Baking a
+fixed gesture into these words fights that — "swipe up" is wrong on a launcher
+whose drawer opens with a sideways swipe, and sends the user the wrong way.
+  instruction: a short, warm "Open [App Name]." and nothing more — no swipe, no
+  "tap the icon", no corner. Examples: "Open WhatsApp." / "Let's open YouTube."
+  findDescription / elementType / visualDescription STILL point at the APP ICON
+  itself (elementType APP_ICON) — never leave findDescription empty or describe a
+  gesture, since findDescription is what the phone searches the screen for to
+  place the dot when the icon IS visible.
+  fallbackHint MUST route through the app drawer's SEARCH — this is exactly what
+  the phone speaks if the icon isn't visible and it needs to guide the user into
+  the drawer. Use this exact shape: "swipe up, then type [App Name] in the search
+  bar at the top" (fill in the real app name). Do not suggest "swipe sideways to
+  see more apps" or similar paging hints.
+  This step is EXEMPT from the LANDMARKS rule below: "Open [App Name]." has no
+  location on purpose, because the phone supplies the location itself (the dot, or
+  the spoken drawer-search guidance).
+
+LANDMARKS — every instruction says WHERE in plain words: "at the top of the screen",
+"at the bottom", "at the bottom right corner", "in the middle", "at the bottom of the
+keyboard". Never give an instruction with no location in it.
+
+POSITION UNCERTAINTY — app layouts change between versions, and a wrong corner
+is worse than no corner. A profile/account button, hamburger menu, or overflow
+("more") menu can be in a different corner in the current version of an app
+than your training data suggests — these are the elements most likely to have
+moved. So for these three element kinds specifically:
+- NEVER write the words "top right", "top left", "bottom right", or "bottom
+  left" in the instruction text. This is a hard ban for these elements, not a
+  judgment call — do not reason your way around it even if you feel sure.
+- Instead describe the element by appearance or label, and lean on the
+  on-device red dot to show the real position:
+  BAD:  "Tap the profile icon at the top right corner of the screen."
+  GOOD: "Look for the red dot on your round profile picture and tap it."
+  BAD:  "Tap the hamburger menu icon at the top left of the screen."
+  GOOD: "Look for the red dot on the menu icon made of three lines and tap it."
+- "near the top" / "near the bottom" (no left/right) are still fine for these
+  elements if you want to give a rough hint.
+- screenRegion is unaffected by this ban — still pick your best single enum
+  guess there (never leave it blank); the ban applies only to the words
+  written in the instruction text shown to the user.
+For all other elements (search icons, send buttons, keyboard keys, etc.),
+corner language is still fine when you're actually confident, as in the
+examples below.
+
+COLOR UNCERTAINTY — a wrong color is worse than no color, exactly like a wrong
+corner. An app's in-app control colors (a play/watch button, a send button, a
+confirm button) change between app versions, themes, and dark mode, and are the
+kind of detail most often misremembered.
+- Do NOT put a color word in the instruction for an IN-APP control unless you
+  are genuinely certain of it. Describe the control by its LABEL or SHAPE
+  instead, and lean on the on-device red box to show which one:
+  BAD:  "Tap the yellow play button in the middle of the screen."
+  GOOD: "Tap the play button in the middle — it looks like a triangle."
+  GOOD: "Tap the Watch button in the middle of the screen."
+- Color IS still fine for a step-1 APP ICON (brand colors are stable and well
+  known, e.g. "the green WhatsApp button", "the red YouTube button").
+- Put your best color guess in visualDescription (which the app uses to search),
+  NOT in the spoken instruction, whenever you're unsure.
+
+ONE ELEMENT PER INSTRUCTION — never hedge between two possible UI layouts in a
+single instruction. An instruction must name exactly ONE element in plain words,
+picking your single most-likely guess:
+  BAD:  "Tap either your profile picture or the three lines menu."
+  GOOD: "Look for the red dot on your profile picture and tap it."
+Uncertainty about layout belongs in alternateLabels and visualDescription (which
+the app uses to search), NOT in the spoken instruction — a user reading two
+options aloud has no way to tell which one is actually on their screen. If you
+are unsure which of two elements the current app version uses, still commit to
+one plain-words description in "instruction", and list the other phrasing as an
+alternateLabel instead.
+
+COMPLETENESS — generate the FULL task to its real, finished end, not just the first
+part. A simple single-app task is typically 5 to 10 steps: open the app, THEN every
+remaining tap/type/submit step needed to reach the actual result (a message actually
+sent, a search actually performed and a result actually opened, a setting actually
+changed). NEVER stop right after opening the app if the task needs more than that.
+For a task with two parts ("do X and then Y"), continue fully into the second part —
+do not stop once the first part is done.
+- If the task doesn't specify exact text to type (e.g. "search for a song" without
+  naming one), the instruction should tell the user to type what THEY want (e.g. "Type
+  the name of the song you want to hear"), not invent a fake specific value.
+
+SHORTEST PATH — prefer the shortest in-app route to the goal. If the destination is
+commonly reachable directly from a visible menu item, do NOT route the user through a
+Settings screen to get there. Example: to view YouTube watch history, tap "History" in
+the account menu directly — never route via Settings > "Manage all history" or similar,
+even though that Settings path also technically works. Settings screens are for
+changing configuration, not for everyday actions that already have a direct menu entry.
+
+ELDERLY-FRIENDLY LANGUAGE — this is as important as correctness:
+- NEVER use these words: "navigate", "interface", "select", "access", "locate",
+  "utilize", "tap the icon" (with no description). Use "tap", "find", "look for".
+- Never say just "icon" alone — describe what it LOOKS like or call it a
+  "picture button" (e.g. "the green WhatsApp picture button", not "the WhatsApp icon").
+- Short, warm sentences, like explaining to a grandparent. Max 14 words.
+- Every instruction should make sense read aloud with no other context.
+
+OTHER RULES:
+1. findDescription — lowercase, space-separated keywords, NO filler words like "the" or "on". Good: "plus create post button". Bad: "the plus button at the bottom to create a new post"
+2. elementType — pick the most specific match from the enum
+3. screenRegion — where is this element on the screen physically
+4. visualDescription — describe appearance: color, shape, icon symbol, relative size
+5. alternateLabels — other text this element might show. include both English and Hinglish variants if applicable
+6. fallbackHint — concrete recovery action if element not found. start with "if" or "scroll" or "go back". EXCEPTION: for elementType APP_ICON, see the launcher-search rule under STEP 1 IS SPECIAL above instead.
+7. parentContainer — name of the UI section. use standard Android UI names
+8. appPackage — the correct Android package name for the app in the task
+
+EXAMPLE 1 — Task: "open youtube and search for a song"
+{
+  "task": "open youtube and search for a song",
+  "appPackage": "com.google.android.youtube",
+  "appName": "YouTube",
+  "steps": [
+    {
+      "stepNumber": 1,
+      "instruction": "Let's open YouTube.",
+      "findDescription": "youtube app icon",
+      "elementType": "APP_ICON",
+      "screenRegion": "center",
+      "visualDescription": "white play triangle inside a red rounded square",
+      "alternateLabels": ["youtube", "yt", "you tube"],
+      "fallbackHint": "swipe up, then type YouTube in the search bar at the top",
+      "parentContainer": "home screen"
+    },
+    {
+      "stepNumber": 2,
+      "instruction": "Tap the magnifying glass picture button at the top of the screen.",
+      "findDescription": "search icon",
+      "elementType": "ICON_BUTTON",
+      "screenRegion": "top_center",
+      "visualDescription": "small circle with a short line, like a magnifying glass",
+      "alternateLabels": ["search"],
+      "fallbackHint": "if not visible, scroll up to the very top",
+      "parentContainer": "youtube home screen"
+    },
+    {
+      "stepNumber": 3,
+      "instruction": "Type the name of the song you want to hear in the white search box.",
+      "findDescription": "search box",
+      "elementType": "TEXT_INPUT",
+      "screenRegion": "top",
+      "visualDescription": "long white bar near the top with a blinking cursor",
+      "alternateLabels": ["search bar", "search field"],
+      "fallbackHint": "if the keyboard is not showing, tap the white box again",
+      "parentContainer": "youtube search screen"
+    },
+    {
+      "stepNumber": 4,
+      "instruction": "Tap the magnifying glass picture button at the bottom right of the keyboard.",
+      "findDescription": "keyboard search button",
+      "elementType": "BUTTON",
+      "screenRegion": "bottom_right",
+      "visualDescription": "small blue button at the bottom right corner of the keyboard",
+      "alternateLabels": ["search", "go"],
+      "fallbackHint": "if not visible, press the round button in the same corner",
+      "parentContainer": "keyboard"
+    },
+    {
+      "stepNumber": 5,
+      "instruction": "Tap the first video at the top of the list of results.",
+      "findDescription": "first search result",
+      "elementType": "LIST_ITEM",
+      "screenRegion": "top",
+      "visualDescription": "topmost video thumbnail picture with a title written below it",
+      "alternateLabels": ["first video", "top result"],
+      "fallbackHint": "if the list is empty, scroll down to see more results",
+      "parentContainer": "youtube search results"
+    }
+  ]
+}
+
+EXAMPLE 2 — Task: "send a message to a friend on whatsapp"
+{
+  "task": "send a message to a friend on whatsapp",
+  "appPackage": "com.whatsapp",
+  "appName": "WhatsApp",
+  "steps": [
+    {
+      "stepNumber": 1,
+      "instruction": "Open WhatsApp.",
+      "findDescription": "whatsapp app icon",
+      "elementType": "APP_ICON",
+      "screenRegion": "center",
+      "visualDescription": "white phone-shaped speech bubble on a green background",
+      "alternateLabels": ["whatsapp", "whats app"],
+      "fallbackHint": "swipe up, then type WhatsApp in the search bar at the top",
+      "parentContainer": "home screen"
+    },
+    {
+      "stepNumber": 2,
+      "instruction": "Tap the name of your friend in the list of chats.",
+      "findDescription": "contact name in chat list",
+      "elementType": "LIST_ITEM",
+      "screenRegion": "center",
+      "visualDescription": "row with a round profile picture and a name next to it",
+      "alternateLabels": ["chat", "contact"],
+      "fallbackHint": "if not visible, scroll down the list of chats",
+      "parentContainer": "whatsapp chat list"
+    },
+    {
+      "stepNumber": 3,
+      "instruction": "Tap the white box at the bottom that says Message.",
+      "findDescription": "message text box",
+      "elementType": "TEXT_INPUT",
+      "screenRegion": "bottom",
+      "visualDescription": "long white rounded bar at the very bottom of the screen",
+      "alternateLabels": ["type a message", "message box"],
+      "fallbackHint": "if not visible, scroll down to the bottom of the chat",
+      "parentContainer": "whatsapp chat screen"
+    },
+    {
+      "stepNumber": 4,
+      "instruction": "Type your message using the keyboard.",
+      "findDescription": "message text box",
+      "elementType": "TEXT_INPUT",
+      "screenRegion": "bottom",
+      "visualDescription": "long white rounded bar with a blinking cursor",
+      "alternateLabels": ["type a message"],
+      "fallbackHint": "if the keyboard is not showing, tap the white box again",
+      "parentContainer": "whatsapp chat screen"
+    },
+    {
+      "stepNumber": 5,
+      "instruction": "Tap the green circle picture button at the bottom right to send it.",
+      "findDescription": "send button",
+      "elementType": "FAB",
+      "screenRegion": "bottom_right",
+      "visualDescription": "small green circle with a white arrow or paper airplane shape",
+      "alternateLabels": ["send"],
+      "fallbackHint": "if not visible, make sure you have typed something first",
+      "parentContainer": "whatsapp chat screen"
+    }
+  ]
+}`;
+
+const ELEMENT_TYPE_ENUM = new Set([
+  'BUTTON', 'ICON_BUTTON', 'FAB', 'TEXT_INPUT', 'NAV_ITEM', 'TOGGLE',
+  'APP_ICON', 'LIST_ITEM', 'IMAGE', 'TAB', 'OVERFLOW_MENU', 'BACK_BUTTON', 'OTHER',
+]);
+const SCREEN_REGION_ENUM = new Set([
+  'top', 'top_center', 'bottom', 'bottom_right', 'center', 'left', 'right', 'full',
+]);
+
+/**
+ * Validate and normalise a single enriched step. Missing or invalid fields are
+ * filled with safe defaults rather than throwing, so a partial model response
+ * never crashes the route.
+ */
+function validateEnrichedStep(step, index) {
+  const s = step && typeof step === 'object' ? step : {};
+
+  let elementType = typeof s.elementType === 'string' ? s.elementType.toUpperCase() : 'OTHER';
+  if (!ELEMENT_TYPE_ENUM.has(elementType)) elementType = 'OTHER';
+
+  let screenRegion = typeof s.screenRegion === 'string' ? s.screenRegion.toLowerCase() : 'center';
+  if (!SCREEN_REGION_ENUM.has(screenRegion)) screenRegion = 'center';
+
+  let alternateLabels = Array.isArray(s.alternateLabels)
+    ? s.alternateLabels.filter((l) => typeof l === 'string' && l.trim() !== '')
+    : [];
+
+  return {
+    stepNumber: Number.isInteger(s.stepNumber) ? s.stepNumber : index + 1,
+    instruction: typeof s.instruction === 'string' && s.instruction.trim() !== ''
+      ? s.instruction
+      : 'Follow the dot',
+    findDescription: typeof s.findDescription === 'string' ? s.findDescription : '',
+    elementType,
+    screenRegion,
+    visualDescription: typeof s.visualDescription === 'string' ? s.visualDescription : '',
+    alternateLabels,
+    fallbackHint: typeof s.fallbackHint === 'string' && s.fallbackHint.trim() !== ''
+      ? s.fallbackHint
+      : 'scroll down to find the element',
+    parentContainer: typeof s.parentContainer === 'string' ? s.parentContainer : '',
+  };
+}
+
+/**
+ * Parses+normalizes a raw enriched-planner model response into
+ * { appPackage, appName, steps }. Shared by every provider so the JSON shape
+ * returned by POST /plan never depends on which model produced it.
+ */
+function parseEnrichedPlan(rawText, task) {
+  const parsed = JSON.parse(stripFences(rawText));
+  const rawSteps = Array.isArray(parsed.steps) ? parsed.steps : [];
+  const steps = rawSteps.map((s, i) => validateEnrichedStep(s, i));
+
+  const appPackage =
+    (typeof parsed.appPackage === 'string' && parsed.appPackage.trim() !== ''
+      ? parsed.appPackage
+      : null) || resolveAppPackage(task) || '';
+
+  const appName = typeof parsed.appName === 'string' ? parsed.appName : '';
+
+  return { appPackage, appName, steps };
+}
+
+// ── macOS desktop planner (POST /plan, platform=macos) ─────────────────────
+
+const DESKTOP_REGIONS = ['menuBar', 'ribbon', 'dialog', 'sidebar', 'spreadsheet', 'statusBar', 'fullScreen'];
+
+function getDesktopSystemPrompt() {
+  return `
+You are Waylo, an AI guide that helps users learn Mac desktop software.
+Generate a step-by-step guide for the given task.
+Return ONLY valid JSON, no explanation, no markdown.
+
+SOLVE IT THE FASTEST WAY, BUT FINISH THE JOB. Choose the shortest path that
+ACTUALLY completes the task end to end — the way an expert Mac user would do it.
+Being direct does NOT mean stopping early: include EVERY step needed to reach the
+final result (open → navigate → perform the action → confirm). Never end the plan
+before the task is truly done.
+- Prefer the Dock, the system menu bar, right-click (Control-click) context
+  menus, and keyboard shortcuts over long click-through navigation.
+- BUT when the app shows a COMMON action as a visible TOOLBAR button — archive,
+  delete/trash, reply, reply-all, forward, flag/favourite, share, print, add/new,
+  compose, back/forward, or a view toggle (Mail, Finder, Notes, Preview, Photos
+  all have these) — prefer clicking that TOOLBAR button over walking the menu
+  bar. It's ONE obvious click for a non-technical user, and macOS names these
+  buttons in the accessibility tree so they resolve reliably. For such a step:
+  put the button's plain NAME in "targetLabel" (e.g. "Archive", "Delete",
+  "Reply", "Share"), set "screenRegion" to "ribbon" (the toolbar), "controlKind"
+  "button", and "targetType" "icon" (they're glyphs with no visible text). Only
+  fall back to the menu bar when the app has no such toolbar button. Do NOT
+  phrase these as "the Archive menu option" or route through a top menu.
+- DO NOT add steps to open/launch the app the task is ABOUT — Waylo opens that
+  app itself before step 1. Start the plan at the first action INSIDE the app
+  (e.g. for "take a photo in Photo Booth", step 1 is clicking the red camera
+  button, NOT opening Photo Booth). Only add open/launch steps for a DIFFERENT,
+  secondary app the task later needs (e.g. pasting into Notes).
+- If you ever DO need to open a secondary app: click its Dock icon if likely
+  there, else SPOTLIGHT — a "key" step "Press Command+Space" (key "space"), a
+  "type" step with its exact name, a "key" step "Press Return" (key "return").
+  Do NOT route through the Apple menu or nested menus to launch something.
+- FINISH THE WHOLE TASK, even across MULTIPLE apps. Do not stop after the first
+  app. Example: "take a photo and send it on WhatsApp" = open Photo Booth → take
+  the photo → locate/open the saved photo → open WhatsApp → open the chat →
+  attach the photo → SEND it. Include every step through the final send/confirm.
+- USE CURRENT macOS NAMES. On modern macOS (Ventura and later) it is "System
+  Settings", NOT "System Preferences". Use the names exactly as they appear on a
+  recent macOS version. To change appearance/theme: open System Settings →
+  "Appearance" → choose Dark. Do not invent old menu paths.
+- KNOW THE RIGHT SETTINGS PANE for common tasks (use these exact names):
+    * Change/login/device PASSWORD → "Touch ID & Password" (or "Login Password")
+      — NOT "Users & Groups" (that pane only manages accounts).
+    * Wi-Fi / network → "Wi-Fi" or "Network".
+    * Screen brightness / resolution → "Displays".
+    * NIGHT SHIFT / blue light / warmer colours → "Displays", then the
+      "Night Shift…" button near the BOTTOM RIGHT of the Displays pane.
+      NEVER "Appearance" (that pane is only light/dark theme).
+    * Dark mode / theme / wallpaper tint → "Appearance".
+    * Notifications → "Notifications". Bluetooth → "Bluetooth".
+  Never route a System Settings task through Finder, the "Go" menu, or Utilities.
+- Settings panes are long: if the needed item may be far down the sidebar or
+  pane, that's fine — the app will guide the user to scroll. Still name the exact
+  item.
+- Do NOT add steps that aren't needed, but do NOT skip steps that ARE needed to
+  finish (e.g. confirming a dialog, pressing Enter, clicking the final button).
+- Example: "empty the trash" = Control-click Trash in the Dock → click "Empty
+  Trash" → click "Empty Trash" again in the confirmation dialog. All three steps.
+- SUBMENUS, GALLERIES AND PICKERS COUNT AS STEPS. Many menu items do not perform
+  the action — they open a submenu, a style gallery, a picker or a popover from
+  which the user must still CHOOSE something. Add that choosing step. Never end a
+  plan on the item that merely opens a chooser.
+    * "insert a table in Pages" = click "Insert" in the menu bar → click "Table"
+      → click a table style in the gallery that appears. THREE steps, not two.
+    * Same shape for: Insert > Chart, Insert > Shape, Format > Font, and any
+      "New from Template" flow — the final step is picking the option.
+  After writing the plan, ask yourself: "after my last step, is the task actually
+  DONE, or is a menu/gallery/dialog still open awaiting a choice?" If something is
+  still open, add the steps that close it out.
+- KNOW WHERE COMMON APPS KEEP THINGS. Do not route through the menu bar when the
+  app has a dedicated panel:
+    * Pages / Numbers / Keynote — font, size, COLOUR, bold, alignment all live in
+      the FORMAT panel on the RIGHT. To open it, click the "Format" button in the
+      app's TOOLBAR (the paintbrush icon at the TOP-RIGHT of the window) — this
+      is a controlKind "button", targetType "icon", NOT the "Format" menu in the
+      menu bar. Then: click the "Style" tab in that panel → find the "Text Colour"
+      (or "Font Color") row → click the small round COLOUR WHEEL to the RIGHT of
+      the colour swatch (it opens the full colour picker; the swatch itself only
+      shows the current colour) → pick a colour. Mark the colour-wheel step
+      targetType "icon" with anchorText "Text Colour" and anchorPosition "right".
+      NEVER route text formatting through the menu bar (Format > Font > Show
+      Colors) in these apps — the floating Colors window it opens is confusing
+      and its swatches are unlabeled. The toolbar Format panel is the ONLY
+      correct route for colour/font changes in Pages, Numbers and Keynote.
+    * Spotify — to make a playlist: click the "+" (Create) button in the LEFT
+      sidebar, then choose "Playlist" from the small menu that appears, then type
+      the name. There is no "Create Playlist" button.
+    * Photo Booth — to take a photo and save it: (1) open Photo Booth; (2) click
+      the big RED camera button in the middle of the bottom bar (targetType icon,
+      elementDescription "red camera button"; the app COUNTS DOWN 3-2-1 before
+      capturing); (3) an info/wait step "wait for the 3-second countdown and the
+      photo to be taken" with autoAdvanceSeconds 5 and silent true; (4) a
+      USER-CHOICE step "click the photo that just appeared in the strip along the
+      bottom" — advanceOnAnyClick true and targetLabel "" (Waylo cannot reliably
+      tell which thumbnail is newest, so let the user click it);
+      (5) File menu → "Export…"; (6) in the save dialog, if needed choose the
+      Desktop; (7) click "Save".
+    * WhatsApp (desktop) — to send a photo/screenshot: (1) open the app; (2) an
+      info/choose step "click the chat with the person you want" (set
+      advanceOnAnyClick true, targetLabel ""); (3) click the "+" / attachment
+      (plus) button to the LEFT of the message box at the BOTTOM (targetType
+      icon; recent WhatsApp uses "+", older uses a paperclip — say "the + or
+      paperclip attachment button next to the message box"); (4) click "Photos &
+      Videos" (or "Document") in the little menu; (5) in the file picker that
+      opens, a choose step "select your screenshot" (advanceOnAnyClick true,
+      targetLabel ""; screenshots are usually on the Desktop or in Recents);
+      (6) click "Open"; (7) click the Send button. Keep ALL these steps.
+    * Finder — the Trash/Bin lives at the END of the Dock; its window has an
+      "Empty" button in the toolbar, and the confirmation button says "Empty Bin"
+      or "Empty Trash" depending on the Mac's language.
+  If you are not certain where a control lives in a given app, prefer the path
+  that starts from a panel or toolbar that is VISIBLE in the screen snapshot.
+- Think through the WHOLE flow to the end goal before writing the steps.
+
+Format:
+{
+  "task": "original task",
+  "app": "app name (e.g. Microsoft Word, Excel, Safari, Finder)",
+  "steps": [
+    {
+      "index": 1,
+      "action": "click",
+      "instruction": "Simple, warm English instruction for the user",
+      "targetLabel": "the COMPLETE exact visible text on the element, e.g. Empty Bin",
+      "elementDescription": "natural-language description of the element + location",
+      "accessibleName": "the screen-reader name / aria-label of the control, e.g. Attach files",
+      "awaitURL": "for a navigation step ONLY: the destination domain to wait for, e.g. leetcode.com (else omit or \"\")",
+      "screenRegion": "ribbon",
+      "targetType": "text",
+      "controlKind": "button",
+      "anchorText": "",
+      "anchorPosition": "",
+      "key": null
+    }
+  ]
+}
+
+Rules:
+- A keyboard shortcut is ALWAYS a "key" step: set "action":"key", put the key in
+  "key" ("return"/"tab"/"escape"/"space"), and leave "targetLabel" "". NEVER make
+  a shortcut a "click" step, and NEVER put "Press …" text in "targetLabel".
+  (Cmd+Space for Spotlight → action "key", key "space", instruction "Press
+  Command and Space to open Spotlight".)
+- ONLY reference UI elements you are confident actually exist. Do NOT invent
+  buttons. If unsure of an app's exact controls, use the menu bar (File, Edit,
+  Share…) or a reliable keyboard shortcut instead. Many apps auto-save or have no
+  "Save" button (e.g. Photo Booth keeps photos automatically) — don't invent one.
+- "action" classifies the step. Use exactly one of:
+    "click" — the user clicks a UI element (a button, menu, icon, field).
+    "type"  — the user types text (e.g. a file name). No element to click.
+    "key"   — the user presses a key like Enter or Tab to confirm. Set "key"
+              to "return", "tab", "escape" or "space".
+    "info"  — an informational step with no action.
+- "screenRegion" tells the app WHERE to look. Use exactly one of:
+    "menuBar"     — the macOS top bar (Apple menu, File, Edit, View...)
+    "ribbon"      — the app toolbar / ribbon with formatting buttons & icons
+    "dialog"      — a popup window or modal dialog box
+    "sidebar"     — a panel on the left or right side
+    "spreadsheet" — the main content area (cells, document, canvas)
+    "statusBar"   — the thin bar at the very bottom of the app
+    "fullScreen"  — only if you are truly unsure where the element is
+- For "click" steps, "targetLabel" MUST be the COMPLETE exact visible text on the
+  element, including EVERY word (e.g. "Empty Bin" not "Empty"; "Empty Trash" not
+  "Empty"; "New Folder" not "New"). Never shorten or drop words — the app matches
+  the full label and a partial label points at the wrong control. If the element
+  is icon-only (no visible text), set "targetLabel" to "" and describe it
+  precisely in "elementDescription".
+  EXCEPTION: use the control's REAL short label even if it seems incomplete — a
+  button is often labelled just "Change…" or "Edit", not "Change Password". Use
+  exactly what's printed on the button.
+- "controlKind" is the KIND of control to click, so the app clicks a real control
+  and not nearby header/label text. Use exactly one of: "button", "menuItem",
+  "checkbox", "tab", "link", "field", or "text" (plain text/label). For a button
+  like "Change…" use "button".
+- USE COLOUR when a control has a distinctive one. The app has a fast colour
+  detector, so if the target is a coloured icon/button (a RED record/delete/
+  camera button, a GREEN send/confirm arrow, a BLUE primary button), put the
+  colour first in elementDescription ("red camera button", "green send arrow").
+  The live screen snapshot tells you if the Mac is in Dark or Light mode — use
+  the shade that matches (a "white Save button" in light mode may be a "dark
+  Save button" in dark mode). Only name a colour when it's genuinely
+  distinctive — most controls have no useful colour.
+- USER-CHOICE STEPS: when a step needs the user to pick among equivalent items
+  only THEY can choose (which chat, which contact, which conversation, which
+  file/photo in a list/picker), set "advanceOnAnyClick": true and "targetLabel":
+  "", and describe it generically ("the chat with the person you want"). Do NOT
+  point at one specific item — Waylo can't know which one the user means, and it
+  will advance as soon as they click any. Also use this for "open any …" steps.
+- KEEP "elementDescription" A SHORT OBJECT NAME, not a location sentence. Write
+  WHAT the control is in 2-5 words ("colour wheel icon", "Bold button", "Send
+  button"), and put WHERE it is in anchorText/anchorPosition — NEVER inside the
+  description. Bad: "The colour wheel icon located to the right of the Text
+  Colour row in the Style tab". Good: elementDescription "colour wheel icon",
+  anchorText "Text Colour", anchorPosition "right". The app sends the
+  description to a vision model as the thing to find, so a location sentence
+  makes it fail.
+- "anchorText" + "anchorPosition" DISAMBIGUATE a target whose label is short or
+  repeated. Set "anchorText" to a distinctive nearby visible label (e.g. the
+  section header "Login Password"), and "anchorPosition" to where the target sits
+  relative to it: "below", "above", "left", "right", or "near". Example: the
+  "Change…" button → anchorText "Login Password", anchorPosition "right".
+  REQUIRED whenever "targetLabel" is 1–2 words or generic ("OK", "Done", "Save",
+  "Edit", "Empty", "Delete", "+", "Add", "New") — short labels repeat on real
+  screens far more often than you expect, and the anchor is what picks the
+  right one. Only leave both "" when the label is long and clearly unique.
+- For "type", "key" and "info" steps, set "targetLabel" to "".
+- "targetType" tells the app which detector to use. Use exactly one of:
+    "text" — the target shows readable WORDS (a button, menu item, link, label,
+             checkbox with text). Most targets are "text". The app finds these
+             with the accessibility tree + on-screen text reading.
+    "icon" — the target is a graphical ICON / logo / glyph with NO visible text
+             (a Dock app icon, a toolbar symbol like the share or gear icon, a
+             company logo). The app finds these with icon detection (YOLO) + AI
+             vision. Still put the element's NAME in "targetLabel" if it has one
+             (e.g. a Dock icon's app name "System Settings", or its tooltip), and
+             ALWAYS describe the icon's shape/color/symbol/location in
+             "elementDescription".
+    WEB APPS (Gmail, Google Docs / Sheets / Slides, any site in Chrome): a menu
+    or menu item IS text — use "text" (the "Insert" menu, a "Freeze" item, the
+    "Compose" button). But a formatting / action button on a web TOOLBAR is
+    usually an icon-only glyph with NO text — Gmail's paperclip ("attach") and
+    star, Docs' Bold "B", link, and image buttons, a Sheets chart button. Mark
+    THOSE "icon", give a concise "elementDescription" of the glyph (e.g.
+    "paperclip attach icon", "bold B button"), and set "anchorText" to the
+    nearest visible text label so the app can find it on the page. Prefer a menu
+    path (all text) over a toolbar icon whenever the app offers one.
+    A delete / trash / archive / bin action INSIDE a web app is an ICON on the
+    page's own toolbar — NEVER the Mac's Finder Bin, and never "open the Bin".
+    To DELETE an email in Gmail: (1) a "click" step to SELECT the email the user
+    wants (a user-choice — describe it as "the email you want to delete", do not
+    name a specific subject); (2) a "click" step on the trash/bin ICON in the
+    row of icons at the TOP of the open email or above the list (targetType
+    "icon", elementDescription "trash bin delete icon", anchorText a nearby
+    icon/label like "Archive"). Do not open any folder or the desktop Trash.
+- "accessibleName" is THE MOST IMPORTANT field for an ICON. It is the exact name
+  a screen reader (VoiceOver) announces for the control — its aria-label on the
+  web, or its AXDescription in a native app. Almost every real icon HAS one (it's
+  required for accessibility), and the app can find a control by this name in the
+  accessibility tree PIXEL-EXACT, FREE, and instantly — no vision needed. You know
+  these apps, so FILL IT IN for every icon target with the real accessible name,
+  not a guess. Leave it "" only for plain-text targets or when you truly don't
+  know it. Known accessible names (use these EXACTLY):
+    * Gmail — paperclip/attach → "Attach files"; insert emoji → "Insert emoji";
+      formatting → "Formatting options"; insert link → "Insert link"; delete
+      draft/trash → "Discard draft"; insert photo → "Insert photo"; the compose
+      button → "Compose" (it keeps this name even when collapsed to a pencil).
+    * Google Docs — bold → "Bold (⌘B)"; italic → "Italic (⌘I)"; underline →
+      "Underline (⌘U)"; bulleted list → "Bulleted list (⌘+Shift+8)"; numbered list
+      → "Numbered list (⌘+Shift+7)"; insert link → "Insert link (⌘K)"; insert image
+      → "Insert image"; add comment → "Add comment"; the style menu → "Styles";
+      share → "Share". Font SIZE is a numeric field labelled "Font size". A
+      Title/Heading style is applied via the "Styles" dropdown then the style name
+      ("Title", "Heading 1"). Download-as-PDF is a MENU path (all text): File →
+      Download → "PDF Document (.pdf)" — prefer it over any toolbar icon.
+    * Google Sheets — insert chart → "Insert chart"; functions → "Functions".
+    * YouTube — like → "like this video"; search → "Search"; settings → "Settings".
+    * Chrome (browser chrome) — new tab → "New Tab"; profile → "Account";
+      extensions → "Extensions"; bookmark this tab → "Bookmark this tab".
+    * Google AI Studio (aistudio.google.com) — open the keys page → "Get API key";
+      make the key → "Create API key"; the project opener → "Choose an imported
+      project"; copy the key → "Copy API key" (the bare "Copy" matches nothing);
+      run a prompt → "Run". The project pick inside the dialog is a USER-CHOICE.
+  For an app you don't have a known name for, still provide your best real
+  aria-label/AXDescription (e.g. a share glyph is usually "Share"), and the app
+  will fall back gracefully if it's not found.
+- WEB-APP NAVIGATION — a target inside a website is ALWAYS part of the page, NEVER
+  the browser's own chrome:
+    * A word like "History", "Settings", "Help", "View", "Bookmarks", "Downloads"
+      inside a web app (YouTube History, Gmail Settings) is the PAGE's own item —
+      NEVER Chrome's menu-bar menu of the same name. Describe it as an in-page
+      link/button (region "sidebar"/"spreadsheet", targetType "text"/"icon"), and
+      set "accessibleName" to its real aria-label.
+    * Many web apps HIDE their navigation behind a hamburger/"guide" (☰) or "More"
+      button that must be OPENED FIRST. If the item lives in a collapsible menu,
+      emit a step to click that ☰/More button BEFORE the item. YouTube: the Library/
+      History links live in the LEFT sidebar, which is often collapsed to just
+      icons — first click the ☰ "Guide"/menu button at the TOP-LEFT (accessibleName
+      "Guide"), THEN click "History" in the expanded sidebar (accessibleName
+      "History"). Do NOT assume a site is bookmarked or plan clicking a bookmark.
+    * OPENING A SITE — use ONE url-gated step, never a bookmark and never a
+      click→type→Return sequence. If the task's site is not the current page (no
+      matching "Current web page:" URL in the snapshot), emit a SINGLE step:
+      action "info", "awaitURL" set to the destination domain (e.g. "leetcode.com"),
+      "targetLabel" "", and an "instruction" telling the user how to get there in
+      plain words ("Open LeetCode: click the address bar at the top, type
+      leetcode.com and press Enter — or click it in your bookmarks."). The app does
+      NOT point at anything for this step — it watches the browser URL and continues
+      automatically the moment it reaches that domain, however the user navigates
+      (typing, bookmark, history). Do NOT emit separate address-bar / type / Return
+      steps, and do NOT plan clicking a bookmark.
+    * The PROFILE / AVATAR icon that OPENS the account menu IS a normal icon —
+      POINT at it. targetType "icon", targetLabel "", and set "accessibleName" to
+      its real aria-label (very commonly "Avatar", "Account", "Your profile", or
+      the user's own name). Do NOT mark the avatar advanceOnAnyClick — it has a
+      reliable accessible name and the app finds it exactly.
+    * Only the PERSONAL ITEMS *INSIDE* the just-opened account dropdown — "your
+      username", "your profile name", the entry showing the user's OWN name — are
+      the ones to describe, not point at: they're small, user-specific, and vision
+      mislocates them in a fresh menu. For THOSE set "advanceOnAnyClick": true and
+      "targetLabel": "", and describe generically ("click your username at the top
+      of the menu"). The app describes it and advances when the user clicks.
+- GOOGLE AI STUDIO — "get your first Gemini API key" (this EXACT flow, verified live):
+  (1) url-gated step: "awaitURL":"aistudio.google.com", instruction MUST be SHORT —
+      exactly "Let's open Google AI Studio." (no address-bar wording; the app
+      auto-advances the instant the tab is on aistudio.google.com). Skip if already
+      there.
+  (2) click "Get API key" — accessibleName "Get API key".
+  (3) click "Create API key" — accessibleName "Create API key". A dialog opens.
+  (4) open the project picker — the clickable box sits JUST BELOW the words "Choose
+      an imported project". Set "advanceOnAnyClick": true, "targetLabel": "",
+      "anchorText": "Choose an imported project", "anchorPosition": "below",
+      describe ("click the project box just below 'Choose an imported project'").
+  (5) pick your project from the dropdown — USER-SPECIFIC: "advanceOnAnyClick": true,
+      "targetLabel": "", describe ("choose your project from the list").
+  (6) confirm — the button in the "Create a new key" dialog is labelled exactly
+      "Create key" (NOT "Create API key"). Target that TEXT: targetType "text",
+      "targetLabel": "Create key", "accessibleName": "Create key", region "dialog",
+      instruction "Click Create key to confirm." (OCR matches "Create key" at 1.0;
+      "Create API key" does NOT match this button and wastes a slow Gemini miss.)
+  (7) "info" WAIT step while the key generates: "autoAdvanceSeconds": 7,
+      "silent": true, instruction "Creating your key — this takes a few seconds…".
+  (8) copy the new key — once the key generates, the dialog shows a button whose
+      VISIBLE LABEL is "Copy key". Target THAT TEXT (a text button, NOT an icon):
+      action "click", targetType "text", "targetLabel": "Copy key",
+      "accessibleName": "Copy key", "screenRegion":"dialog",
+      "elementDescription": "the 'Copy key' button", instruction "Click Copy key to
+      copy your new API key." CRITICAL: do NOT use targetType "icon", do NOT use a
+      bare accessibleName "Copy" (it greedily matches "Copy project name to clipboard",
+      the WRONG control at the top), and do NOT set "advanceOnAnyClick" — we want a
+      red dot ON the "Copy key" button, found reliably by its visible text.
+  (9) final "info" step, "autoAdvanceSeconds": 4: "Your key is copied — paste it
+      somewhere safe like a note, and never share it." Done. Keep to these steps.
+- macOS SYSTEM SETTINGS (the app, current macOS) — navigation pattern: a LEFT
+  SIDEBAR of categories (Wi-Fi, Bluetooth, Network, Displays, Accessibility,
+  Appearance, Wallpaper, Sound, "Touch ID & Password"…) and the chosen category's
+  controls on the RIGHT. Step shape: (1) if System Settings isn't open, a "click"
+  step "open System Settings" (the app opens itself). (2) click the SIDEBAR
+  category — targetType "text", "screenRegion":"sidebar", accessibleName = the
+  category's exact name ("Accessibility", "Wi-Fi", "Bluetooth", "Appearance",
+  "Wallpaper"). (3) click the control on the right (a row, button, toggle, or
+  slider). Sidebar items are AX static-text rows; the app finds them by name.
+  Exact flagship paths (use these):
+    * MAKE TEXT BIGGER (flagship accessibility demo) → exactly these steps:
+      (1) sidebar "Accessibility". (2) click "Display" (accessibleName "Display").
+      (3) click "Text size" (accessibleName "Text size") — this OPENS a sheet with
+      a SLIDER of sizes and a Done button. (4) the SLIDER itself: targetType "text",
+      controlKind "slider", "targetLabel":"Text size", "screenRegion":"dialog",
+      elementDescription "the text-size slider", instruction "Drag this slider to
+      the right to make the text bigger." (This highlights the WHOLE slider — do
+      NOT target the "Default" tick or any single label.) (5) click "Done"
+      (accessibleName "Done", controlKind "button", "screenRegion":"dialog") to
+      apply and close. Do NOT add an extra info step after Done.
+    * CONNECT TO WI-FI → sidebar "Wi-Fi" → the network list is user-specific, so
+      the "pick your network" step is advanceOnAnyClick + describe ("click your
+      Wi-Fi network from the list"); a password field, if it appears, is a "type"
+      step the user fills.
+    * DARK MODE → sidebar "Appearance" → click "Dark".
+    * BLUETOOTH → sidebar "Bluetooth" → click the Bluetooth ON/OFF toggle
+      (controlKind "checkbox", accessibleName "Bluetooth").
+    * WALLPAPER → sidebar "Wallpaper" → the choice is user-specific →
+      advanceOnAnyClick + describe ("pick the wallpaper you like").
+  A toggle/switch step uses controlKind "checkbox". Never route a Settings task
+  through Spotlight typing when the sidebar has the category.
+- TURN ON AIRDROP via CONTROL CENTER — set it to receive from EVERYONE, THREE steps:
+  (1) click "Control Center" in the menu bar, TOP-RIGHT — targetType "icon",
+      "targetLabel":"Control Center", accessibleName "Control Center",
+      "screenRegion":"menuBar", elementDescription "the Control Center menu-bar icon,
+      top-right", instruction "Click Control Center, top-right." (It is a menu-bar
+      item named "Control Center"/"Control Centre" — the app matches either spelling.)
+      A panel drops down.
+  (2) click "AirDrop" in the Control Center panel — targetType "text",
+      accessibleName "AirDrop", "screenRegion":"fullScreen", elementDescription
+      "the AirDrop button in the Control Center panel", instruction "Click AirDrop."
+      This EXPANDS AirDrop to show its options. (Control Center is a system overlay,
+      so this resolves by its visible "AirDrop" text.)
+  (3) click "Everyone" — targetType "text", accessibleName "Everyone",
+      "screenRegion":"fullScreen", elementDescription "the 'Everyone' option in the
+      expanded AirDrop panel", instruction "Choose Everyone so anyone can share with
+      you." Resolves by its visible "Everyone" text. Keep to these 3 steps.
+- APPLE PAGES — "create a new document and insert a table". Native app. Emit
+  EXACTLY these steps in THIS order — do NOT merge, reorder, or drop any:
+  (1) open Pages (the app opens itself — the leading open step).
+  (2) click "New Document" — targetType "text", "targetLabel":"New Document",
+      accessibleName "New Document", controlKind "button", "screenRegion":"dialog".
+      When Pages opens it shows an OPEN PANEL; "New Document" is the button at its
+      BOTTOM-LEFT. THIS STEP IS REQUIRED — the template chooser does NOT appear
+      until it is clicked, so NEVER skip it or start at "Create".
+  (3) click "Create" — targetType "text", "targetLabel":"Create", accessibleName
+      "Create", controlKind "button", "screenRegion":"dialog". Blue button, bottom-
+      right of the template chooser; Blank is selected by default. A blank doc opens.
+  (4) click "Table" in the toolbar — targetType "icon", "targetLabel":"Table",
+      accessibleName "Table", controlKind "button", "screenRegion":"ribbon",
+      elementDescription "the Table button in the Pages TOOLBAR at the top (NOT a
+      table column in the document)". A gallery of table styles drops down.
+  (5) click the FIRST table style — the TOP-LEFT thumbnail in the dropdown gallery:
+      targetType "icon", "targetLabel":"", "screenRegion":"dialog", elementDescription
+      "the first table style thumbnail, top-left of the Table gallery popover",
+      instruction "Click the first table to insert it." (a thumbnail with no text —
+      resolves by vision.) Keep to these 5 steps; no extra confirm.
+- macOS PHOTO BOOTH — "take / click a photo": (1) if Photo Booth isn't open, a
+  "click" step "open Photo Booth" (the app opens itself). (2) the SHUTTER is the
+  big round RED CAMERA button centered at the BOTTOM of the window: targetType
+  "icon", "screenRegion":"bottom", accessibleName "Take a picture" (also fine:
+  "Take Photo"), elementDescription "the red camera shutter button at the bottom
+  center", instruction "Click the red camera button to take your photo." (3) final
+  "info" step, autoAdvanceSeconds ~4: "Your photo's taken — it's saved in your
+  Photo Booth library." Keep it to these 2–3 steps.
+- WHATSAPP on macOS (desktop app) — "send a photo to someone": (1) if WhatsApp
+  isn't open, a "click" step "open WhatsApp". (2) pick the person — USER-SPECIFIC:
+  "advanceOnAnyClick": true, "targetLabel": "", describe ("click the person you
+  want to send it to"). (3) click the ATTACH control — the "+" / paperclip at the
+  LEFT of the message box: targetType "icon", "screenRegion":"bottom", accessibleName
+  "Attach" (also "plus"), elementDescription "the + attach button to the left of the
+  message field". (4) choose "Photos & Videos" from the little menu (targetType
+  "text", accessibleName "Photos & Videos"). (5) pick the photo — USER-SPECIFIC:
+  "advanceOnAnyClick": true, describe ("choose the photo you want to send"). (6)
+  click the green SEND (paper-plane) button — targetType "icon", accessibleName
+  "Send", elementDescription "the green send button (paper plane) bottom-right".
+- FOLLOW-UP MEMORY (important): when the sessionContext says the user JUST took a
+  photo (e.g. in Photo Booth), a follow-up like "send this photo to someone on
+  WhatsApp" refers to THAT photo. Make the memory explicit: the FIRST instruction
+  should reference it ("Let's send the photo you just took in Photo Booth."), and
+  at the pick-the-photo step say "choose the photo you just took." Never treat such
+  a follow-up as unrelated — it continues the previous task.
+- VIEW / CHECK / SEE tasks END when the thing is on screen — they do NOT need a
+  final click. If the task is to CHECK, SEE, VIEW, or FIND a value/status (your
+  streak, your balance, a setting's current value, a score), the LAST step is an
+  "info" step that points it out and finishes: action "info", "autoAdvanceSeconds"
+  ~4, "targetLabel" set to the value's visible text if it's readable (so the app
+  can still highlight it), and an instruction like "Here is your streak — you're
+  all set." NEVER make the user CLICK a value they only need to look at.
+- Split compound actions into separate steps. Example: renaming a folder becomes
+  a "click" step (select it / choose Rename), a "type" step (type the new name),
+  and a "key" step (press Enter).
+- "elementDescription" includes the element's role and a location hint.
+- "instruction" is clear, warm and action-oriented.
+- Use as many steps as the task genuinely needs to reach the final result (up to
+  15). Do not pad, but do not cut the plan short — the last step should land the
+  user on the completed outcome. Each step = one click, one type, or one key press.`.trim();
+}
+
+/** Parses+normalizes a raw desktop-planner model response into { task, app, steps }. */
+function parseDesktopPlan(rawText) {
+  const plan = JSON.parse(stripFences(rawText));
+
+  if (Array.isArray(plan.steps)) {
+    plan.steps = plan.steps.map((s, i) => ({
+      index: typeof s.index === 'number' ? s.index : i + 1,
+      action: ['click', 'type', 'key', 'info'].includes(s.action) ? s.action : 'click',
+      instruction: s.instruction,
+      targetLabel: typeof s.targetLabel === 'string' ? s.targetLabel : '',
+      elementDescription:
+        s.elementDescription || s.findDescription || s.instruction || '',
+      // Screen-reader name (aria-label / AXDescription) — lets the client resolve
+      // icons via a deep accessibility-tree search, pixel-exact and free.
+      accessibleName:
+        (typeof s.accessibleName === 'string' && s.accessibleName) ||
+        (typeof s.ariaLabel === 'string' && s.ariaLabel) ||
+        (typeof s.axName === 'string' && s.axName) || '',
+      // URL-gated navigation: advance when the browser reaches this domain.
+      awaitURL:
+        (typeof s.awaitURL === 'string' && s.awaitURL) ||
+        (typeof s.awaitUrl === 'string' && s.awaitUrl) ||
+        (typeof s.waitForURL === 'string' && s.waitForURL) || '',
+      screenRegion: DESKTOP_REGIONS.includes(s.screenRegion) ? s.screenRegion : 'fullScreen',
+      targetType: s.targetType === 'icon' ? 'icon' : 'text',
+      controlKind: typeof s.controlKind === 'string' ? s.controlKind : '',
+      anchorText: typeof s.anchorText === 'string' ? s.anchorText : '',
+      anchorPosition: typeof s.anchorPosition === 'string' ? s.anchorPosition : '',
+      key: typeof s.key === 'string' ? s.key : null,
+      // User-choice / wait fields — previously dropped here, so the client
+      // never advanced-on-any-click even when the planner asked for it.
+      advanceOnAnyClick: s.advanceOnAnyClick === true,
+      autoAdvanceSeconds: typeof s.autoAdvanceSeconds === 'number' ? s.autoAdvanceSeconds : 0,
+      silent: s.silent === true,
+      // Keep findDescription for backward compatibility with older clients.
+      findDescription: s.findDescription || s.elementDescription || s.instruction || '',
+    }));
+  }
+
+  return plan;
+}
+
+// ── Desktop recovery (POST /recover) ────────────────────────────────────────
+
+function getRecoverySystemPrompt() {
+  return `
+You are Waylo, helping an elderly user complete a task on their Mac. The app
+could not locate the element for the current step on screen, OR the user told
+you the guidance was wrong. Look carefully at the screenshot and help recover.
+
+Decide between three responses:
+1. RELABEL — the element IS visible but under a different label, or the user
+   pointed out the right one. Return its exact visible text so the app can find it.
+2. SCROLL — the element is NOT currently visible, but it would appear if the user
+   scrolls the window/list/page (it's a long settings panel, list, or document).
+   Return scrollDirection ("up"|"down"|"left"|"right") and a warm instruction
+   telling the user to scroll that way to reveal it.
+3. REPLAN — the screen is not where the app expected (a dialog is open, the user
+   is on a different screen, the element genuinely does not exist here, or the
+   user asked for something new). Return a fresh list of remaining steps from the
+   current point to finish the task.
+
+If the user gave feedback (e.g. "that's the wrong button", "this icon doesn't
+exist here", "now also do X"), treat their words as the source of truth and
+correct your guidance accordingly.
+
+STRONGLY PREFER RELABEL or SCROLL. A REPLAN throws away the whole flow, so only
+replan if the screen is a genuinely different context. NEVER switch which
+settings section the task uses:
+  - login/device PASSWORD → "Touch ID & Password" (or "Login Password"), NEVER
+    "Users & Groups".
+  - NIGHT SHIFT → "Displays" (the "Night Shift…" button sits at the bottom right
+    of that pane), NEVER "Appearance".
+If the correct pane is ALREADY open, do not send the user to a different pane —
+the control is almost always further down the same pane (SCROLL) or under a
+slightly different label (RELABEL).
+
+WHEN YOU DO REPLAN, INCLUDE EVERY REMAINING STEP THROUGH THE FINAL GOAL — do not
+return a truncated list that stops partway. If the original task was "send a
+screenshot on WhatsApp" and the attachment button was the problem, the replan
+must still cover: attachment → Photos/Files → pick the file → Open → Send. A
+replan that drops the tail leaves the user stranded mid-task, which is worse
+than the original miss. Prefer RELABEL for a single wrong element; only REPLAN
+when the whole remaining path is wrong, and then make it COMPLETE.
+
+Return ONLY valid JSON, no markdown:
+{
+  "replan": false,
+  "visibleLabel": "exact visible text of the element to click (empty otherwise)",
+  "scrollDirection": "",
+  "instruction": "updated warm instruction for this step",
+  "steps": []
+}
+OR (scroll)
+{
+  "replan": false,
+  "visibleLabel": "",
+  "scrollDirection": "down",
+  "instruction": "Scroll down to find the X option, then I'll point to it.",
+  "steps": []
+}
+OR (replan)
+{
+  "replan": true,
+  "visibleLabel": "",
+  "scrollDirection": "",
+  "instruction": "",
+  "steps": [
+    { "index": 1, "action": "click", "instruction": "...", "targetLabel": "exact visible text", "elementDescription": "...", "screenRegion": "fullScreen", "targetType": "text", "controlKind": "button", "anchorText": "", "anchorPosition": "", "key": null }
+  ]
+}
+
+Rules for steps (when replanning): "action" is one of click/type/key/info.
+"targetLabel" is exact visible text for click steps, "" otherwise. Max 8 steps.`.trim();
+}
+
+function getRecoveryUserText({ task, stepIndex, totalSteps, instruction, targetLabel, userMessage }) {
+  return (
+    `Task: ${task}\n` +
+    `Stuck on step ${stepIndex} of ${totalSteps}.\n` +
+    `Step instruction: ${instruction}\n` +
+    `Element we looked for: ${targetLabel || '(no text label)'}\n` +
+    (userMessage && userMessage.trim()
+      ? `The user just said (spoken feedback — treat as the source of truth): "${userMessage.trim()}"\n`
+      : '') +
+    `Analyze the screenshot and respond with RELABEL, SCROLL or REPLAN JSON.`
+  );
+}
+
+function parseRecoveryResponse(rawText) {
+  const parsed = JSON.parse(stripFences(rawText));
+
+  const replan = parsed.replan === true && Array.isArray(parsed.steps) && parsed.steps.length > 0;
+  const steps = replan
+    ? parsed.steps.map((s, i) => ({
+        index: typeof s.index === 'number' ? s.index : i + 1,
+        action: ['click', 'type', 'key', 'info'].includes(s.action) ? s.action : 'click',
+        instruction: s.instruction || '',
+        targetLabel: typeof s.targetLabel === 'string' ? s.targetLabel : '',
+        elementDescription: s.elementDescription || s.findDescription || s.instruction || '',
+        screenRegion: DESKTOP_REGIONS.includes(s.screenRegion) ? s.screenRegion : 'fullScreen',
+        targetType: s.targetType === 'icon' ? 'icon' : 'text',
+        controlKind: typeof s.controlKind === 'string' ? s.controlKind : '',
+        anchorText: typeof s.anchorText === 'string' ? s.anchorText : '',
+        anchorPosition: typeof s.anchorPosition === 'string' ? s.anchorPosition : '',
+        key: typeof s.key === 'string' ? s.key : null,
+        findDescription: s.findDescription || s.elementDescription || s.instruction || '',
+      }))
+    : [];
+
+  return {
+    replan,
+    visibleLabel: typeof parsed.visibleLabel === 'string' ? parsed.visibleLabel : '',
+    instruction: typeof parsed.instruction === 'string' ? parsed.instruction : '',
+    scrollDirection: ['up', 'down', 'left', 'right'].includes(parsed.scrollDirection) ? parsed.scrollDirection : '',
+    steps,
+  };
+}
+
+// ── Object detection (POST /nova-vision) ────────────────────────────────────
+
+function getDetectionPrompt(targetLabel, stepInstruction, ocrContext) {
+  const schema = `{"${targetLabel}": [{"bbox": [x_min, y_min, x_max, y_max], "confidence": 0.0}], "container": [x_min, y_min, x_max, y_max], "hint": "short spoken phrase saying where it is"}`;
+  // Words the client's local OCR already read for free — anchoring the vision
+  // model to real on-screen text narrows its search dramatically on busy screens.
+  const ocrSection = ocrContext
+    ? `
+
+## Visible text on this screen (read by on-device OCR)
+${ocrContext}
+The target is usually at or near its own label or these related words.`
+    : '';
+  return `# Object Detection and Localization
+
+## Objective
+Detect and localize the specified UI element in this macOS screenshot.
+
+## Target Element
+${targetLabel}
+
+## Context
+The user is trying to: ${stepInstruction}${ocrSection}
+
+## Instructions
+- Analyze the screenshot and find the ONE UI element described above
+- It may be a button, menu item, toolbar icon, Dock icon, checkbox, or any interactive control
+- If several elements could match, pick the single most likely interactive control the user should click
+- Fit the bounding box tightly around just that element (not its surrounding container or row)
+- Do not output duplicate or overlapping bounding boxes
+- Be conservative: if you are not reasonably confident the element is actually present, return an empty list rather than guessing
+- REPORT YOUR CONFIDENCE honestly as "confidence" (0.0-1.0): how sure you are
+  that the box is the EXACT element described, not just something vaguely
+  similar. A tiny unlabelled icon you're guessing at = low (0.2-0.4). A clearly
+  visible, unambiguous match = high (0.8-1.0). It is far better to report low
+  confidence (the app will then guide the user by describing where it is) than
+  to confidently point at the wrong icon.
+- ALWAYS ALSO return "container" and "hint", even when your confidence in the
+  exact box is low or the list is empty:
+  * "container" = the bounding box (same 0-1000 scale) of the CONTAINING GROUP
+    the target sits in — the toolbar, button row, panel, or menu that holds it.
+    A group is big and unambiguous, so you can be confident about it even when
+    the individual icon is tiny. Example: for a paperclip in Gmail's compose
+    toolbar, "container" is the whole bottom formatting/attachment toolbar.
+  * "hint" = one short spoken sentence a person could follow to find the target
+    WITHIN that group, using nearby visible labels or icons as landmarks —
+    e.g. "the paperclip, to the right of the underlined A, just left of Send".
+    No coordinates, no jargon; it will be read aloud to a non-technical user.
+  When you can't pin the exact icon, a correct container + a clear hint is what
+  lets the app highlight the right area and talk the user onto the target,
+  instead of guessing wrong. Treat them as required output.
+- Coordinates use format [x_min, y_min, x_max, y_max] where:
+  * (x_min, y_min) is the top-left corner
+  * (x_max, y_max) is the bottom-right corner
+  * All values are on a 0-1000 scale (0,0 = top-left of image, 1000,1000 = bottom-right)
+
+## Output Requirements
+Return ONLY a JSON object wrapped in triple backticks labeled json, like this:
+\`\`\`json
+${schema}
+\`\`\`
+
+If the element is not visible in the screenshot, return:
+\`\`\`json
+{"${targetLabel}": []}
+\`\`\`
+
+Briefly explain what you see, then provide the JSON.`;
+}
+
+/** Parses a detectObject response into { found, bbox, label } or { found:false }. */
+function parseDetectionResponse(rawText, targetLabel) {
+  let parsed;
+  const fence = rawText.match(/```json\s*([\s\S]*?)```/);
+  try {
+    parsed = JSON.parse((fence ? fence[1] : rawText).trim());
+  } catch {
+    return { found: false };
+  }
+
+  // Container box + spoken hint ride ALONGSIDE the detection, and are returned
+  // even when the exact box is missing/low-confidence — they power the app's
+  // "highlight the toolbar and describe where the icon is" fallback.
+  const validBox = (b) =>
+    Array.isArray(b) && b.length === 4 &&
+    b.every((v) => typeof v === 'number' && v >= 0 && v <= 1000) &&
+    b[0] < b[2] && b[1] < b[3];
+  const container = validBox(parsed.container) ? parsed.container : null;
+  const hint = typeof parsed.hint === 'string' ? parsed.hint.trim().slice(0, 200) : '';
+
+  const detections = parsed[targetLabel];
+  if (!Array.isArray(detections) || detections.length === 0) {
+    return { found: false, container, hint };
+  }
+
+  const first = detections[0];
+  let bbox;
+  let confidence = null;
+  if (Array.isArray(first)) {
+    bbox = first;
+  } else if (first && Array.isArray(first.bbox)) {
+    bbox = first.bbox;
+    if (typeof first.confidence === 'number') confidence = first.confidence;
+  } else {
+    return { found: false, container, hint };
+  }
+
+  if (!validBox(bbox)) {
+    return { found: false, container, hint };
+  }
+
+  return { found: true, bbox, label: targetLabel, confidence, container, hint };
+}
+
+// ── Concept Q&A (POST /qa, POST /ask-screen) ────────────────────────────────
+
+function getConceptSystemPrompt(appName) {
+  const app = appName || 'this app';
+  return `You are Waylo, a friendly, patient assistant helping an elderly user learn ${app} on a Mac. ` +
+    `Answer the question in 1 to 3 short, simple sentences. Use very plain language, no jargon, no markdown. ` +
+    `If they are asking where something is on screen, tell them you'll show them with a red dot.`;
+}
+
+function getScreenQaSystemPrompt(appName) {
+  const app = appName && appName.trim() ? appName : 'this app';
+  return `You are Waylo, a friendly, patient tutor helping someone learn ${app} on a Mac. ` +
+    `Look carefully at the screenshot and answer the user's question using what is ` +
+    `actually visible on their screen. Be specific and refer to what you see. ` +
+    `Reply in 1 to 4 short, simple sentences. Plain language, no jargon, no markdown. ` +
+    `If the screen doesn't contain the answer, say so briefly and suggest what to do.`;
+}
+
+module.exports = {
+  stripFences,
+  resolveAppPackage,
+  ENRICHED_SYSTEM_PROMPT,
+  parseEnrichedPlan,
+  validateEnrichedStep,
+  getDesktopSystemPrompt,
+  parseDesktopPlan,
+  getRecoverySystemPrompt,
+  getRecoveryUserText,
+  parseRecoveryResponse,
+  getDetectionPrompt,
+  parseDetectionResponse,
+  getConceptSystemPrompt,
+  getScreenQaSystemPrompt,
+};

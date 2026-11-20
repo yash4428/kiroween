@@ -1,0 +1,913 @@
+import torch
+import torch.serialization
+from ultralytics.nn.tasks import DetectionModel
+torch.serialization.add_safe_globals([DetectionModel])
+import asyncio
+import base64
+import io
+import json
+import os
+import re
+from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
+
+import uvicorn
+from fastapi import FastAPI, HTTPException
+from huggingface_hub import hf_hub_download
+from PIL import Image
+from pydantic import BaseModel
+from ultralytics import YOLO
+
+app = FastAPI(title="Sahayak YOLO Detection Service")
+
+# ── Model loading ──────────────────────────────────────────
+# Load ONCE at startup. Never reload per request.
+executor = ThreadPoolExecutor(max_workers=2)
+
+omni_model: Optional[YOLO] = None
+macos_model: Optional[YOLO] = None
+# Vision-text model for semantic box↔label matching. YOLO boxes carry no
+# text, so without this the caller can't tell "the Bold icon" from any other
+# icon. MATCH_MODEL=siglip (default, better text-image matching) | clip |
+# off. DISABLE_CLIP_MATCH=1 also disables (legacy name, kept working).
+clip_model = None
+clip_processor = None
+match_model_name = ""
+
+
+@app.on_event("startup")
+def load_models():
+    global omni_model, macos_model, clip_model, clip_processor
+
+    print("[YOLO] Loading OmniParser icon_detect...")
+    omni_path = "weights/icon_detect/model.pt"
+    if not os.path.exists(omni_path):
+        raise RuntimeError(
+            f"OmniParser weights not found at {omni_path}. "
+            "Run: huggingface-cli download microsoft/OmniParser-v2.0 "
+            "'icon_detect/model.pt' --local-dir weights"
+        )
+    omni_model = YOLO(omni_path)
+    print("[YOLO] OmniParser loaded.")
+
+    print("[YOLO] Loading Screen2AX yolov11l...")
+    # A fine-tuned checkpoint (finetune/train.py) takes precedence; the hub
+    # download would otherwise clobber it on restart.
+    custom_path = "weights/screen2ax-custom/ui-elements-detection.pt"
+    if os.path.exists(custom_path):
+        macos_path = custom_path
+        print("[YOLO] Using FINE-TUNED Screen2AX checkpoint (weights/screen2ax-custom).")
+    else:
+        macos_path = hf_hub_download(
+            repo_id="macpaw-research/yolov11l-ui-elements-detection",
+            filename="ui-elements-detection.pt",
+            local_dir="weights/screen2ax",
+        )
+    macos_model = YOLO(macos_path)
+    print("[YOLO] Screen2AX loaded.")
+
+    global match_model_name
+    # DEFAULT OFF (2026-08-10): SigLIP/CLIP text→icon matching returns ~0 on real
+    # 18px UI glyphs (proven in production: conf 0.000) — a domain/scale mismatch
+    # no threshold fixes. It only cost RAM + startup. Web icons resolve via the
+    # accessibility name (deep AX search) and native icons via AX; unlabelled
+    # icons fall back to YOLO region-detect + "describe & learn from the click".
+    # Set MATCH_MODEL=siglip to re-enable for experiments.
+    requested = os.environ.get("MATCH_MODEL", "off").lower()
+    if os.environ.get("DISABLE_CLIP_MATCH") == "1" or requested == "off":
+        print("[MATCH] disabled (default) — icons resolve via AX name + YOLO region + learn-from-click.")
+    else:
+        # Try SigLIP first (stronger text-image matching at similar cost),
+        # fall back to CLIP, fall back to none — detection always works.
+        candidates = (["siglip", "clip"] if requested == "siglip" else ["clip"])
+        from transformers import AutoModel, AutoProcessor
+        repos = {
+            "siglip": "google/siglip-base-patch16-224",
+            "clip": "openai/clip-vit-base-patch32",
+        }
+        for name in candidates:
+            try:
+                repo = repos[name]
+                print(f"[MATCH] Loading {repo}...")
+                # AutoModel/AutoProcessor avoids class-name import errors across
+                # transformers versions; use_fast=True skips the SentencePiece
+                # slow tokenizer path when a fast one exists.
+                clip_model = AutoModel.from_pretrained(repo)
+                clip_processor = AutoProcessor.from_pretrained(repo, use_fast=True)
+                clip_model.eval()
+                match_model_name = name
+                print(f"[MATCH] {name} loaded — semantic box matching enabled.")
+                break
+            except Exception as e:  # degrade gracefully
+                import traceback
+                print(f"[MATCH] {name} load failed: {e}")
+                traceback.print_exc()
+                clip_model = None
+                clip_processor = None
+    load_custom_vocab()
+    build_icon_vocab()
+    # Image-to-image icon namer (the ~2000-icon reference library) only makes
+    # sense with a match model loaded. With matching off by default it was pure
+    # startup cost + RAM for no benefit (rendered-glyph references don't match
+    # real rendered icons — a domain gap), so skip building it unless matching is
+    # actually enabled. Learned REAL icons still work: they live in the client's
+    # local IconMemory (perceptual hash), not here.
+    if clip_model is not None:
+        import threading
+        threading.Thread(target=build_icon_reference, name="icon-reference", daemon=True).start()
+    else:
+        print("[MATCH] reference-icon library skipped (matching off) — leaner startup.")
+    print("[YOLO] Service ready.")
+
+
+# ── Request/Response models ────────────────────────────────
+class DetectRequest(BaseModel):
+    screenshot_b64: str
+    target_label: Optional[str] = None
+    step_instruction: Optional[str] = None
+    screen_region: Optional[str] = None  # menuBar|ribbon|dialog|sidebar|fullScreen
+
+
+class DetectedElement(BaseModel):
+    x: float        # normalized 0-1, left edge, top-left origin
+    y: float        # normalized 0-1, top edge, top-left origin
+    w: float        # normalized width
+    h: float        # normalized height
+    cx: float       # center x, normalized 0-1
+    cy: float       # center y, normalized 0-1
+    confidence: float
+    source: str     # "screen2ax" | "omniparser"
+    ax_class: Optional[str]  # "AXButton" etc. from Screen2AX, None from OmniParser
+    # RELATIVE score: similarity softmaxed across all scored boxes (sums to ~1).
+    # Tells you which box is most target-like — but a softmax ALWAYS crowns a
+    # winner, even when the target is absent from the image entirely.
+    match_score: Optional[float] = None
+    # ABSOLUTE score: raw cosine similarity of this crop vs the target text
+    # (SigLIP: its calibrated sigmoid probability). This is what says "the
+    # target is actually HERE", independent of the other boxes. Callers must
+    # gate on this, or a screen without the target still yields a confident
+    # (and wrong) winner.
+    match_conf: Optional[float] = None
+    # Tier 2: zero-shot concept label ("search", "attach") for a textless icon,
+    # or None when no vocabulary concept matched distinctly.
+    caption: Optional[str] = None
+    # Icon NAME from IMAGE-to-image matching against the reference icon library
+    # (the reliable path — SigLIP is good at image similarity, bad at text->icon).
+    # This is how EVERY detected icon box gets labelled.
+    image_caption: Optional[str] = None
+    image_conf: Optional[float] = None
+
+
+class DetectResponse(BaseModel):
+    elements: list[DetectedElement]
+    omni_count: int
+    macos_count: int
+    merged_count: int
+    # True when match_score was computed for this request.
+    match_applied: bool = False
+
+
+# ── IoU helper ─────────────────────────────────────────────
+def iou(a: dict, b: dict) -> float:
+    ax1, ay1 = a["x"], a["y"]
+    ax2, ay2 = a["x"] + a["w"], a["y"] + a["h"]
+    bx1, by1 = b["x"], b["y"]
+    bx2, by2 = b["x"] + b["w"], b["y"] + b["h"]
+    inter_w = max(0, min(ax2, bx2) - max(ax1, bx1))
+    inter_h = max(0, min(ay2, by2) - max(ay1, by1))
+    inter = inter_w * inter_h
+    union = a["w"] * a["h"] + b["w"] * b["h"] - inter
+    return inter / union if union > 0 else 0.0
+
+
+# ── Merge logic ────────────────────────────────────────────
+def merge_results(omni_res, macos_res, img_size: tuple) -> list[dict]:
+    W, H = img_size
+    boxes = []
+
+    # Screen2AX FIRST — higher priority, has AX class names
+    for box in macos_res.boxes:
+        x1, y1, x2, y2 = box.xyxy[0].tolist()
+        cls_name = macos_res.names[int(box.cls[0])]
+        cx = ((x1 + x2) / 2) / W
+        cy = ((y1 + y2) / 2) / H
+        boxes.append({
+            "x": x1 / W, "y": y1 / H,
+            "w": (x2 - x1) / W, "h": (y2 - y1) / H,
+            "cx": cx, "cy": cy,
+            "confidence": float(box.conf[0]),
+            "source": "screen2ax",
+            "ax_class": cls_name,
+        })
+
+    # OmniParser SECOND — add only if NOT overlapping any Screen2AX box by > 40%
+    for box in omni_res.boxes:
+        x1, y1, x2, y2 = box.xyxy[0].tolist()
+        cx = ((x1 + x2) / 2) / W
+        cy = ((y1 + y2) / 2) / H
+        candidate = {
+            "x": x1 / W, "y": y1 / H,
+            "w": (x2 - x1) / W, "h": (y2 - y1) / H,
+            "cx": cx, "cy": cy,
+            "confidence": float(box.conf[0]),
+            "source": "omniparser",
+            "ax_class": None,
+        }
+        if not any(iou(candidate, existing) > 0.4 for existing in boxes):
+            boxes.append(candidate)
+
+    return sorted(boxes, key=lambda b: b["confidence"], reverse=True)
+
+
+# ── CLIP semantic matching ─────────────────────────────────
+# How many top-confidence boxes get scored (bounds CPU latency: one batched
+# forward pass over N crops, ~200-400ms on CPU for 16).
+CLIP_MAX_BOXES = 16
+# Pad crops slightly — icons are tiny and CLIP benefits from a little context.
+CLIP_CROP_PAD = 0.15
+
+
+def _as_embedding(out):
+    """transformers 4.x returns a Tensor from get_*_features; 5.x returns a
+    BaseModelOutputWithPooling. Accept either."""
+    import torch
+    if isinstance(out, torch.Tensor):
+        return out
+    for attr in ("pooler_output", "text_embeds", "image_embeds", "last_hidden_state"):
+        value = getattr(out, attr, None)
+        if isinstance(value, torch.Tensor):
+            return value if value.dim() == 2 else value.mean(dim=1)
+    raise TypeError(f"cannot extract embedding tensor from {type(out).__name__}")
+
+
+def _crop_boxes(img: Image.Image, boxes: list[dict]) -> list[Image.Image]:
+    """Padded crops for a set of normalized boxes (icons benefit from context)."""
+    W, H = img.size
+    crops = []
+    for b in boxes:
+        pad_w, pad_h = b["w"] * CLIP_CROP_PAD, b["h"] * CLIP_CROP_PAD
+        left = max(0, (b["x"] - pad_w) * W)
+        top = max(0, (b["y"] - pad_h) * H)
+        right = min(W, (b["x"] + b["w"] + pad_w) * W)
+        bottom = min(H, (b["y"] + b["h"] + pad_h) * H)
+        if right - left < 4 or bottom - top < 4:
+            crops.append(img.resize((32, 32)))  # degenerate box — placeholder crop
+        else:
+            crops.append(img.crop((left, top, right, bottom)))
+    return crops
+
+
+def clip_match(img: Image.Image, boxes: list[dict], target_label: str,
+               step_instruction: str) -> None:
+    """Scores each box's crop against the target text and writes match_score
+    in place. Softmax across boxes → a RELATIVE 'which box means the target'
+    distribution, which is exactly what the caller needs to pick one."""
+    import torch
+
+    scored = sorted(boxes, key=lambda b: b["confidence"], reverse=True)[:CLIP_MAX_BOXES]
+    if not scored:
+        return
+
+    crops = _crop_boxes(img, scored)
+
+    # Two phrasings of the target; their embeddings are averaged. The plain
+    # label helps for text buttons, the template helps for icons.
+    texts = [target_label, f"the {target_label} button or icon in a user interface"]
+    if step_instruction:
+        texts.append(step_instruction)
+
+    # Use the tokenizer / image processor DIRECTLY rather than the combined
+    # Processor.__call__, whose signature and returned keys shifted between
+    # transformers 4.x and 5.x. Pass each model only the tensors it needs.
+    tokenizer = getattr(clip_processor, "tokenizer", clip_processor)
+    image_processor = getattr(clip_processor, "image_processor", clip_processor)
+    as_embedding = _as_embedding
+
+    with torch.no_grad():
+        if match_model_name == "siglip":
+            # SigLIP is trained with fixed 64-token, max_length-padded input.
+            text_in = tokenizer(texts, padding="max_length", max_length=64,
+                                truncation=True, return_tensors="pt")
+            text_in.pop("attention_mask", None)   # SigLIP text tower ignores it
+        else:
+            text_in = tokenizer(texts, padding=True, truncation=True, return_tensors="pt")
+
+        text_emb = as_embedding(clip_model.get_text_features(**text_in))
+        text_emb = text_emb / text_emb.norm(dim=-1, keepdim=True)
+        text_emb = text_emb.mean(dim=0, keepdim=True)
+        text_emb = text_emb / text_emb.norm(dim=-1, keepdim=True)
+
+        img_in = image_processor(images=crops, return_tensors="pt")
+        img_emb = as_embedding(clip_model.get_image_features(pixel_values=img_in["pixel_values"]))
+        img_emb = img_emb / img_emb.norm(dim=-1, keepdim=True)
+
+        sims = (img_emb @ text_emb.T).squeeze(1)          # cosine similarities
+        probs = torch.softmax(sims * 100.0, dim=0)        # relative: who wins
+        confs = sims                                       # absolute: is it here at all?
+
+        # SigLIP is trained with a sigmoid loss, so sigmoid(logit_scale * sim +
+        # logit_bias) is a CALIBRATED "does this image match this text"
+        # probability — exactly the absent-target check a softmax can't give.
+        if match_model_name == "siglip":
+            scale = getattr(clip_model, "logit_scale", None)
+            bias = getattr(clip_model, "logit_bias", None)
+            if scale is not None and bias is not None:
+                confs = torch.sigmoid(sims * scale.exp() + bias).squeeze(-1)
+
+    for b, p, c in zip(scored, probs.tolist(), confs.tolist()):
+        b["match_score"] = round(float(p), 4)
+        b["match_conf"] = round(float(c), 4)
+
+
+# ── Zero-shot icon captioning (Tier 2) ─────────────────────
+# Turn each textless icon into TEXT by picking its closest concept from a fixed
+# vocabulary (OmniParser's caption-first idea, done cheaply by reusing SigLIP as
+# a zero-shot classifier — no extra model, no GPU). The caption rides along on
+# each box so the Set-of-Mark decider sees "#7 search, #8 attach" instead of
+# guessing from pixels alone.
+ICON_VOCAB = [
+    ("search", "a search or magnifying-glass icon"),
+    ("settings", "a settings gear icon"),
+    ("add", "an add or plus icon"),
+    ("close", "a close or X icon"),
+    ("menu", "a hamburger menu icon with stacked lines"),
+    ("more options", "a three-dots more-options icon"),
+    ("back", "a back or left-arrow icon"),
+    ("forward", "a forward or right-arrow icon"),
+    ("home", "a home icon"),
+    ("attach", "a paperclip attachment icon"),
+    ("send", "a send or paper-plane icon"),
+    ("microphone", "a microphone voice icon"),
+    ("camera", "a camera or take-photo icon"),
+    ("image", "a photo or image icon"),
+    ("emoji", "a smiley-face emoji icon"),
+    ("play", "a play triangle icon"),
+    ("pause", "a pause icon"),
+    ("next", "a next-track skip-forward icon"),
+    ("previous", "a previous-track skip-back icon"),
+    ("download", "a download icon"),
+    ("share", "a share icon"),
+    ("delete", "a delete or trash-can icon"),
+    ("edit", "an edit or pencil icon"),
+    ("like", "a heart or like icon"),
+    ("bookmark", "a star or bookmark icon"),
+    ("notifications", "a bell notifications icon"),
+    ("profile", "a person or profile-avatar icon"),
+    ("calendar", "a calendar icon"),
+    ("location", "a location map-pin icon"),
+    ("filter", "a filter icon"),
+    ("refresh", "a refresh or reload icon"),
+    ("expand", "a chevron-down expand icon"),
+    ("checkmark", "a checkmark or tick icon"),
+    ("info", "an information icon"),
+    ("lock", "a padlock lock icon"),
+    ("show", "an eye show/hide icon"),
+    # ── Text-editor / document toolbar (Docs, Word, Pages, mail composers) ──
+    ("bold", "a bold text B button"),
+    ("italic", "an italic text I button"),
+    ("underline", "an underline text U button"),
+    ("strikethrough", "a strikethrough text S button"),
+    ("text color", "a text color letter-A with a colored underline"),
+    ("highlight", "a text highlighter marker icon"),
+    ("align left", "an align-left text-lines icon"),
+    ("align center", "an align-center text-lines icon"),
+    ("align right", "an align-right text-lines icon"),
+    ("justify", "a justify text-lines icon"),
+    ("bulleted list", "a bulleted list icon with dots"),
+    ("numbered list", "a numbered list icon with digits"),
+    ("indent", "an increase-indent arrow icon"),
+    ("outdent", "a decrease-indent arrow icon"),
+    ("link", "a chain-link hyperlink icon"),
+    ("comment", "a speech-bubble comment icon"),
+    ("insert image", "a picture or landscape image-insert icon"),
+    ("table", "a grid table icon"),
+    ("chart", "a bar-chart insert icon"),
+    ("format paint", "a paintbrush or paint-roller format icon"),
+    ("print", "a printer icon"),
+    ("undo", "a curved undo left-arrow icon"),
+    ("redo", "a curved redo right-arrow icon"),
+    ("spellcheck", "an ABC checkmark spellcheck icon"),
+    ("font", "a font typeface letter icon"),
+    # ── Mail / messaging composers ──
+    ("reply", "a reply curved-arrow icon"),
+    ("reply all", "a reply-all double curved-arrow icon"),
+    ("forward", "a forward curved-arrow icon"),
+    ("archive", "an archive box icon"),
+    ("spam", "a stop or report-spam icon"),
+    ("star", "a star icon"),
+    ("important", "a yellow chevron important marker"),
+    ("label", "a tag or label icon"),
+    ("move to", "a folder move-to icon"),
+    ("compose", "a pencil compose new-message icon"),
+    ("format text", "an underlined A formatting icon"),
+    ("insert emoji", "a smiley-face emoji insert icon"),
+    ("insert link", "a chain-link insert icon"),
+    ("attach file", "a paperclip attach-file icon"),
+    ("insert photo", "an image insert-photo icon"),
+    ("discard draft", "a trash-can discard icon"),
+    # ── Browser chrome (so a page target does NOT get captioned as these) ──
+    ("browser back", "a browser back left-arrow icon"),
+    ("browser forward", "a browser forward right-arrow icon"),
+    ("browser reload", "a browser reload circular-arrow icon"),
+    ("browser bookmark", "a browser bookmark star in the address bar"),
+    ("browser extensions", "a puzzle-piece browser extensions icon"),
+    ("browser profile", "a browser account profile avatar icon"),
+    ("browser menu", "a three-dot browser menu icon"),
+    ("new tab", "a plus new-tab icon"),
+    ("close tab", "an x close-tab icon"),
+    # ── Media / conferencing ──
+    ("mute", "a crossed-out microphone mute icon"),
+    ("volume", "a speaker volume icon"),
+    ("fullscreen", "an expand-to-fullscreen icon"),
+    ("stop", "a stop square icon"),
+    ("record", "a record red-dot circle icon"),
+    ("video camera", "a video camera icon"),
+    ("end call", "a red end-call phone icon"),
+    ("screen share", "a screen-share monitor-with-arrow icon"),
+    ("captions", "a CC closed-captions icon"),
+    ("participants", "a people group participants icon"),
+    # ── File management / system ──
+    ("new folder", "a folder-with-plus new-folder icon"),
+    ("upload", "an upload up-arrow-into-tray icon"),
+    ("save", "a floppy-disk save icon"),
+    ("copy", "a copy overlapping-pages icon"),
+    ("cut", "a scissors cut icon"),
+    ("paste", "a clipboard paste icon"),
+    ("grid view", "a grid layout view icon"),
+    ("list view", "a list rows view icon"),
+    ("sort", "a sort up-down-arrows icon"),
+    ("zoom in", "a magnifier-with-plus zoom-in icon"),
+    ("zoom out", "a magnifier-with-minus zoom-out icon"),
+    ("help", "a question-mark help icon"),
+    ("warning", "a triangle warning icon"),
+    ("power", "a power on/off icon"),
+    ("wifi", "a wifi signal icon"),
+    ("battery", "a battery icon"),
+    ("bluetooth", "a bluetooth icon"),
+    ("cart", "a shopping-cart icon"),
+    ("dropdown", "a small downward caret dropdown arrow"),
+]
+icon_vocab_emb = None  # torch tensor [V, D], L2-normalized
+# Learned concepts (idea 5): user-verified icon names harvested from real use,
+# appended to the built-in vocabulary and persisted across restarts. The
+# vocabulary GROWS with the product instead of staying a static English list.
+CUSTOM_VOCAB_PATH = "weights/custom_vocab.json"
+custom_vocab: list = []  # [(name, phrase)]
+
+
+def load_custom_vocab():
+    global custom_vocab
+    try:
+        if os.path.exists(CUSTOM_VOCAB_PATH):
+            with open(CUSTOM_VOCAB_PATH) as f:
+                custom_vocab = [tuple(x) for x in json.load(f)]
+            print(f"[CAPTION] loaded {len(custom_vocab)} learned concepts.")
+    except Exception as e:
+        print(f"[CAPTION] custom vocab load failed: {e}")
+        custom_vocab = []
+
+
+def full_vocab():
+    return ICON_VOCAB + custom_vocab
+
+
+def build_icon_vocab():
+    """Embed the icon vocabulary (built-in + learned). Called at startup and
+    again whenever a new concept is learned."""
+    global icon_vocab_emb
+    if clip_model is None:
+        return
+    import torch
+    tokenizer = getattr(clip_processor, "tokenizer", clip_processor)
+    phrases = [p for _, p in full_vocab()]
+    try:
+        with torch.no_grad():
+            if match_model_name == "siglip":
+                tin = tokenizer(phrases, padding="max_length", max_length=64,
+                                truncation=True, return_tensors="pt")
+                tin.pop("attention_mask", None)
+            else:
+                tin = tokenizer(phrases, padding=True, truncation=True, return_tensors="pt")
+            emb = _as_embedding(clip_model.get_text_features(**tin))
+            emb = emb / emb.norm(dim=-1, keepdim=True)
+        icon_vocab_emb = emb
+        print(f"[CAPTION] icon vocabulary embedded ({len(phrases)} concepts, {len(custom_vocab)} learned).")
+    except Exception as e:
+        print(f"[CAPTION] vocab embed failed: {e}")
+
+
+# Only assign a caption when the top concept beats the runner-up by this margin —
+# an ambiguous crop (no distinct icon) gets no caption rather than a wrong guess.
+CAPTION_MARGIN = 0.03
+
+
+# ── IMAGE-to-image icon labelling (the reliable icon namer) ────────────────
+# SigLIP fails at TEXT->tiny-icon ("archive" vs a 20px glyph = ~0). But it's good
+# at IMAGE->image similarity. So we embed a library of LABELLED reference icon
+# images once, then label each YOLO box by the reference icon it most resembles.
+# This is what lets us name every icon YOLO detects and pick the one we need.
+icon_ref_emb = None       # torch [R, D] L2-normalized image embeddings
+icon_ref_names: list = [] # [R] names, aligned to icon_ref_emb rows
+
+# Reference sources (checked in order): a folder of labelled PNGs, else glyphs
+# rendered from an icon font (one .ttf + a "name codepoint" list → ~2000 icons).
+ICON_REF_DIR = "reference_icons"
+ICON_FONT_PATH = os.environ.get("ICON_FONT_PATH", "weights/icon_font/MaterialIcons-Regular.ttf")
+ICON_CODEPOINTS_PATH = os.environ.get("ICON_CODEPOINTS_PATH", "weights/icon_font/MaterialIcons-Regular.codepoints")
+# Minimum cosine similarity to accept a reference-icon label for a box. Raised
+# to 0.75 after field data showed clean Material FONT glyphs vs real macOS icons
+# have a big domain gap — at 0.55 it mislabelled (archive -> "smart screen") and
+# could pick a wrong box. High bar = image-match only fires on a strong, safe
+# match; the durable fix is REAL captured icons as references (see notes).
+IMAGE_CAPTION_MIN_SIM = float(os.environ.get("ICON_MATCH_MIN_SIM", "0.75"))
+
+
+def _load_reference_icon_images():
+    """Returns [(name, PIL.Image)] reference icons from BOTH sources, unioned so
+    the dataset spans platforms: real captured/seed icons in reference_icons/
+    (SF Symbols = macOS/Pages/Mail/Finder, plus learned real captures) AND glyphs
+    rendered from the Material icon font (web/Chrome/Gmail-style). Empty means
+    image matching stays disabled (service still works via the other layers)."""
+    icons = []
+    n_png = 0
+    if os.path.isdir(ICON_REF_DIR):
+        for fn in sorted(os.listdir(ICON_REF_DIR)):
+            if fn.lower().endswith((".png", ".jpg", ".jpeg")):
+                # filename is "<label>.png" or "<label>__<hash>.png" (uploads add
+                # a hash so same-label captures don't overwrite) — drop the hash.
+                stem = os.path.splitext(fn)[0].split("__")[0]
+                name = re.sub(r"[^a-z0-9 ]", " ", stem.replace("_", " ").lower()).strip()
+                try:
+                    icons.append((name, Image.open(os.path.join(ICON_REF_DIR, fn)).convert("RGB")))
+                    n_png += 1
+                except Exception:
+                    pass
+        print(f"[ICONREF] loaded {n_png} reference_icons/*.png (real/seed).", flush=True)
+    # ALSO render the Material font (web-style coverage), IN ADDITION to the PNGs.
+    if os.path.exists(ICON_FONT_PATH) and os.path.exists(ICON_CODEPOINTS_PATH):
+        try:
+            from PIL import ImageFont, ImageDraw
+            font = ImageFont.truetype(ICON_FONT_PATH, 44)
+            with open(ICON_CODEPOINTS_PATH) as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) != 2:
+                        continue
+                    name = re.sub(r"[^a-z0-9 ]", " ", parts[0].replace("_", " ").lower()).strip()
+                    try:
+                        glyph = chr(int(parts[1], 16))
+                    except ValueError:
+                        continue
+                    im = Image.new("RGB", (64, 64), (255, 255, 255))
+                    d = ImageDraw.Draw(im)
+                    try:
+                        bb = d.textbbox((0, 0), glyph, font=font)
+                        gw, gh = bb[2] - bb[0], bb[3] - bb[1]
+                        d.text(((64 - gw) / 2 - bb[0], (64 - gh) / 2 - bb[1]), glyph, font=font, fill=(30, 30, 30))
+                    except Exception:
+                        d.text((10, 6), glyph, font=font, fill=(30, 30, 30))
+                    icons.append((name, im))
+            print(f"[ICONREF] +{len(icons) - n_png} icons rendered from the Material font "
+                  f"(total {len(icons)} references).", flush=True)
+        except Exception as e:
+            print(f"[ICONREF] font render failed: {type(e).__name__}: {e}", flush=True)
+    return icons
+
+
+# Cache the (slow) reference embeddings to disk so we embed the ~2000 icons ONCE,
+# not on every restart — on this CPU that walk is minutes.
+ICON_REF_CACHE = "weights/icon_ref_cache.pt"
+
+
+def _log(msg):
+    """Flushed logging — background-thread prints are block-buffered under pm2
+    and otherwise never appear until the process exits."""
+    print(msg, flush=True)
+
+
+def build_icon_reference():
+    """Embed the reference icon IMAGES and populate icon_ref_emb. Loads from a
+    disk cache when the icon set is unchanged (fast); otherwise embeds once and
+    caches. Runs on a BACKGROUND thread (see startup) so it never blocks the
+    service — image-matching simply switches on when this finishes."""
+    global icon_ref_emb, icon_ref_names
+    _log("[ICONREF] background build starting…")
+    if clip_model is None:
+        _log("[ICONREF] ABORT: SigLIP/CLIP model not loaded — image matching unavailable.")
+        return
+    import torch
+    refs = _load_reference_icon_images()
+    if not refs:
+        _log("[ICONREF] no reference icons found — add reference_icons/*.png or run "
+             "download_icon_font.sh. Image icon-matching disabled (other layers still work).")
+        return
+    names = [n for n, _ in refs]
+
+    # Disk cache: reuse embeddings when the exact icon set matches.
+    if os.path.exists(ICON_REF_CACHE):
+        try:
+            cached = torch.load(ICON_REF_CACHE, map_location="cpu")
+            if cached.get("names") == names and cached.get("emb") is not None:
+                icon_ref_emb = cached["emb"]
+                icon_ref_names = names
+                _log(f"[ICONREF] loaded {len(names)} reference embeddings from cache.")
+                return
+            _log("[ICONREF] cache stale (icon set changed) — re-embedding.")
+        except Exception as e:
+            _log(f"[ICONREF] cache load failed ({e}) — re-embedding.")
+
+    image_processor = getattr(clip_processor, "image_processor", clip_processor)
+    imgs = [im for _, im in refs]
+    try:
+        _log(f"[ICONREF] embedding {len(names)} reference icons (one-time, in background)…")
+        embs = []
+        with torch.no_grad():
+            for i in range(0, len(imgs), 128):     # batch to bound memory
+                pin = image_processor(images=imgs[i:i + 128], return_tensors="pt")
+                e = _as_embedding(clip_model.get_image_features(pixel_values=pin["pixel_values"]))
+                e = e / e.norm(dim=-1, keepdim=True)
+                embs.append(e)
+                _log(f"[ICONREF]   … {min(i + 128, len(imgs))}/{len(imgs)} embedded")
+        emb = torch.cat(embs, dim=0)
+        icon_ref_emb = emb
+        icon_ref_names = names
+        try:
+            torch.save({"names": names, "emb": emb}, ICON_REF_CACHE)
+        except Exception as e:
+            _log(f"[ICONREF] cache save failed: {e}")
+        _log(f"[ICONREF] embedded + cached {len(names)} reference icons for image-to-image matching.")
+    except Exception as e:
+        import traceback
+        _log(f"[ICONREF] embed FAILED: {type(e).__name__}: {e}")
+        traceback.print_exc()
+
+
+def caption_boxes_by_image(img: Image.Image, boxes: list[dict], max_boxes: int = 48) -> None:
+    """Label each box with the reference icon it most RESEMBLES (image->image).
+    Writes `image_caption` + `image_conf`. This is the general icon namer."""
+    if clip_model is None or icon_ref_emb is None:
+        return
+    import torch
+    scored = sorted(boxes, key=lambda b: b["confidence"], reverse=True)[:max_boxes]
+    if not scored:
+        return
+    crops = _crop_boxes(img, scored)
+    image_processor = getattr(clip_processor, "image_processor", clip_processor)
+    with torch.no_grad():
+        pin = image_processor(images=crops, return_tensors="pt")
+        e = _as_embedding(clip_model.get_image_features(pixel_values=pin["pixel_values"]))
+        e = e / e.norm(dim=-1, keepdim=True)
+        sims = e @ icon_ref_emb.T                    # [N, R] cosine
+        top = torch.max(sims, dim=1)
+    for b, sim, idx in zip(scored, top.values.tolist(), top.indices.tolist()):
+        if sim >= IMAGE_CAPTION_MIN_SIM:
+            b["image_caption"] = icon_ref_names[idx]
+            b["image_conf"] = round(float(sim), 4)
+
+
+def match_target_by_image_caption(boxes: list[dict], target_label: str) -> bool:
+    """Given every box's image_caption, set match_score/match_conf on the box(es)
+    whose label matches the target, so the client's existing box-picker chooses
+    it. Returns True if a match was set."""
+    lab = re.sub(r"[^a-z0-9 ]", " ", target_label.lower())
+    stop = {"the", "icon", "button", "box", "in", "on", "a", "an", "of", "to", "toolbar"}
+    lab_words = {w for w in lab.split() if len(w) > 2 and w not in stop}
+    if not lab_words:
+        return False
+    best = None
+    for b in boxes:
+        cap = b.get("image_caption")
+        if not cap:
+            continue
+        cap_words = set(cap.split())
+        if lab_words & cap_words:                    # shares a real word
+            conf = b.get("image_conf", 0.0)
+            b["match_conf"] = conf
+            b["match_score"] = conf
+            if best is None or conf > (best.get("image_conf") or 0):
+                best = b
+    if best is not None:
+        best["match_score"] = max(best.get("match_score", 0.0), 0.9)  # decisive winner
+        print(f"[ICONREF] target '{target_label}' matched box captioned "
+              f"'{best.get('image_caption')}' conf {best.get('image_conf'):.3f}")
+        return True
+    return False
+
+
+def add_icon_reference(label: str, img: Image.Image) -> int:
+    """Embed a REAL captured/seed icon and append it to the live reference
+    library, and persist it as a PNG so it survives restart. This is how the
+    labelled-icon dataset GROWS — from confirmed finds and the seed set. Returns
+    the new library size."""
+    global icon_ref_emb, icon_ref_names
+    if clip_model is None:
+        return 0
+    import torch
+    image_processor = getattr(clip_processor, "image_processor", clip_processor)
+    with torch.no_grad():
+        pin = image_processor(images=[img], return_tensors="pt")
+        e = _as_embedding(clip_model.get_image_features(pixel_values=pin["pixel_values"]))
+        e = e / e.norm(dim=-1, keepdim=True)          # [1, D]
+    if icon_ref_emb is None:
+        icon_ref_emb = e
+        icon_ref_names = [label]
+    else:
+        icon_ref_emb = torch.cat([icon_ref_emb, e], dim=0)
+        icon_ref_names = icon_ref_names + [label]
+    # Persist as a PNG in reference_icons/ so it's reloaded on restart. A content
+    # hash in the name keeps multiple real captures of the same concept.
+    try:
+        os.makedirs(ICON_REF_DIR, exist_ok=True)
+        import hashlib
+        h = hashlib.md5(img.tobytes()).hexdigest()[:8]
+        safe = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_") or "icon"
+        img.save(os.path.join(ICON_REF_DIR, f"{safe}__{h}.png"))
+    except Exception as ex:
+        _log(f"[ICONREF] reference save failed: {ex}")
+    # The startup cache is keyed by the icon-name set; drop it so the enlarged
+    # set is re-embedded fresh next boot (in-memory is already updated for now).
+    try:
+        if os.path.exists(ICON_REF_CACHE):
+            os.remove(ICON_REF_CACHE)
+    except Exception:
+        pass
+    return len(icon_ref_names)
+
+
+def caption_boxes(img: Image.Image, boxes: list[dict], max_boxes: int = 36) -> None:
+    """Writes a best-guess `caption` on each box via zero-shot vocab matching."""
+    if clip_model is None or icon_vocab_emb is None:
+        return
+    import torch
+    scored = sorted(boxes, key=lambda b: b["confidence"], reverse=True)[:max_boxes]
+    if not scored:
+        return
+    crops = _crop_boxes(img, scored)
+    image_processor = getattr(clip_processor, "image_processor", clip_processor)
+    with torch.no_grad():
+        img_in = image_processor(images=crops, return_tensors="pt")
+        img_emb = _as_embedding(clip_model.get_image_features(pixel_values=img_in["pixel_values"]))
+        img_emb = img_emb / img_emb.norm(dim=-1, keepdim=True)
+        sims = img_emb @ icon_vocab_emb.T            # [N, V] cosine
+        top2 = torch.topk(sims, k=2, dim=1)
+    vocab = full_vocab()
+    for b, vals, idxs in zip(scored, top2.values.tolist(), top2.indices.tolist()):
+        if vals[0] - vals[1] > CAPTION_MARGIN:       # distinct match only
+            b["caption"] = vocab[idxs[0]][0]
+
+
+# ── Main detection endpoint ────────────────────────────────
+def run_omni(img: Image.Image):
+    return omni_model(img, conf=0.25, verbose=False)[0]
+
+
+def run_macos(img: Image.Image):
+    return macos_model(img, conf=0.25, verbose=False)[0]
+
+
+@app.post("/detect", response_model=DetectResponse)
+async def detect(req: DetectRequest):
+    if omni_model is None or macos_model is None:
+        raise HTTPException(status_code=503, detail="Models not loaded yet")
+
+    try:
+        img_bytes = base64.b64decode(req.screenshot_b64)
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid image: {e}")
+
+    # Run both models in parallel: total latency = max(omni, macos), not sum.
+    loop = asyncio.get_running_loop()
+    omni_future = loop.run_in_executor(executor, run_omni, img)
+    macos_future = loop.run_in_executor(executor, run_macos, img)
+    omni_res, macos_res = await asyncio.gather(omni_future, macos_future)
+
+    omni_count = len(omni_res.boxes)
+    macos_count = len(macos_res.boxes)
+    print(f"[YOLO] OmniParser: {omni_count} boxes | Screen2AX: {macos_count} boxes")
+
+    merged = merge_results(omni_res, macos_res, img.size)
+    print(f"[YOLO] Merged: {len(merged)} boxes after IoU dedup")
+
+    # Semantic matching: score boxes against the step's target text so the
+    # caller can pick the box that MEANS the target, not just any confident one.
+    match_applied = False
+    label = (req.target_label or "").strip()
+    if clip_model is not None and label:
+        try:
+            loop2 = asyncio.get_running_loop()
+            # IMAGE-to-image FIRST: label every box by the reference icon it
+            # resembles, then pick the box whose label matches the target. This
+            # is the reliable icon namer (SigLIP image similarity), and it labels
+            # every detected icon as a bonus.
+            if icon_ref_emb is not None:
+                await loop2.run_in_executor(executor, caption_boxes_by_image, img, merged)
+                if match_target_by_image_caption(merged, label):
+                    match_applied = True
+            # TEXT match too — it still helps for text-bearing controls and as a
+            # fallback when no reference icon matched.
+            if not match_applied:
+                await loop2.run_in_executor(
+                    executor, clip_match, img, merged, label, (req.step_instruction or "").strip()
+                )
+                match_applied = True
+            if merged:
+                best = max(merged, key=lambda b: b.get("match_score") or 0)
+                print(f"[MATCH] '{label}' — top score {best.get('match_score'):.2f} "
+                      f"conf {(best.get('match_conf') or 0):.3f} "
+                      f"img_caption={best.get('image_caption')}")
+        except Exception as e:
+            import traceback
+            print(f"[CLIP] match failed ({type(e).__name__}: {e}) — returning unscored boxes")
+            traceback.print_exc()
+    elif clip_model is not None and not label:
+        # No specific target → the Set-of-Mark path wants ALL boxes captioned
+        # so textless icons arrive as words ("search", "attach").
+        try:
+            loop3 = asyncio.get_running_loop()
+            await loop3.run_in_executor(executor, caption_boxes, img, merged)
+            if icon_ref_emb is not None:
+                await loop3.run_in_executor(executor, caption_boxes_by_image, img, merged)
+            captioned = sum(1 for b in merged if b.get("caption") or b.get("image_caption"))
+            print(f"[CAPTION] labelled {captioned}/{len(merged)} boxes")
+        except Exception as e:
+            print(f"[CAPTION] failed ({type(e).__name__}: {e}) — boxes uncaptioned")
+
+    elements = [DetectedElement(**b) for b in merged]
+    return DetectResponse(
+        elements=elements,
+        omni_count=omni_count,
+        macos_count=macos_count,
+        merged_count=len(merged),
+        match_applied=match_applied,
+    )
+
+
+class IconRefRequest(BaseModel):
+    label: str          # what the icon IS ("archive", "reply", "attach")
+    image_b64: str      # a real captured/seed icon image (PNG/JPEG)
+
+
+@app.post("/icon-reference")
+async def icon_reference(req: IconRefRequest):
+    """Add a REAL labelled icon to the image-match reference library (the
+    labelled-icon dataset). Called by the seed tool and on every confirmed find,
+    so image-matching learns exactly what each icon looks like. Fleet-wide."""
+    if clip_model is None:
+        return {"added": False, "reason": "no match model"}
+    label = re.sub(r"[^a-z0-9 ]", " ", (req.label or "").lower()).strip()
+    if len(label) < 2:
+        return {"added": False, "reason": "label too short"}
+    try:
+        img = Image.open(io.BytesIO(base64.b64decode(req.image_b64))).convert("RGB")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"bad image: {e}")
+    loop = asyncio.get_running_loop()
+    total = await loop.run_in_executor(executor, add_icon_reference, label, img)
+    return {"added": True, "label": label, "total": total}
+
+
+class VocabRequest(BaseModel):
+    name: str                      # short concept ("shuffle")
+    phrase: Optional[str] = None   # optional full phrase for the embedder
+
+
+@app.post("/vocab")
+async def add_vocab(req: VocabRequest):
+    """Learn a new icon concept (idea 5): called when a USER-VERIFIED detection
+    carries a concept the vocabulary doesn't know. Appends, re-embeds, persists —
+    the captioner recognises it from then on."""
+    name = re.sub(r"[^a-z0-9 ]", "", req.name.strip().lower())[:40].strip()
+    if not name or len(name) < 3:
+        raise HTTPException(status_code=400, detail="name too short")
+    existing = {n for n, _ in full_vocab()}
+    if name in existing:
+        return {"added": False, "reason": "known", "total": len(full_vocab())}
+    phrase = (req.phrase or f"a {name} icon in a user interface").strip()[:120]
+    custom_vocab.append((name, phrase))
+    try:
+        os.makedirs(os.path.dirname(CUSTOM_VOCAB_PATH), exist_ok=True)
+        with open(CUSTOM_VOCAB_PATH, "w") as f:
+            json.dump([list(x) for x in custom_vocab], f)
+    except Exception as e:
+        print(f"[CAPTION] persist failed: {e}")
+    # Re-embed in the worker pool (CPU-bound, ~100ms).
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(executor, build_icon_vocab)
+    print(f"[CAPTION] learned concept '{name}'")
+    return {"added": True, "total": len(full_vocab())}
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "omni_loaded": omni_model is not None,
+        "macos_loaded": macos_model is not None,
+        "clip_loaded": clip_model is not None,
+        "match_model": match_model_name,
+    }
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
