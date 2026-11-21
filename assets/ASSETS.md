@@ -11,7 +11,7 @@ Animation CDN (the static 512 px frame of each emoji), then resized to 128 px wi
 - ⚠️ Before the public hackathon repo goes out, re-check the license text on the project page and
   keep this attribution in the final README.
 
-| File (`Sources/WailoHaunted/Resources/`) | Emoji | Codepoint | Source URL |
+| File (`app/Sources/Wailo/Resources/`) | Emoji | Codepoint | Source URL |
 |---|---|---|---|
 | ghost.png | 👻 | 1f47b | https://fonts.gstatic.com/s/e/notoemoji/latest/1f47b/512.png |
 | pumpkin.png | 🎃 | 1f383 | https://fonts.gstatic.com/s/e/notoemoji/latest/1f383/512.png |
