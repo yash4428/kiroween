@@ -12,6 +12,8 @@ features may begin once the contracts they use are available.
 - [ ] 4. Run the cross-feature build, test, privacy, display/Spaces, accessibility, and CPU acceptance
   checks. Record manual results in the README with hardware and macOS context. _Req: R12.2, R12.5,
   R13.3–R13.5, R14.1–R14.4_
+- [ ] 5. Apply [Haunting v2](../haunting-v2/tasks.md) to replace the mascot and leaves, add pumpkin
+  physics/bin behavior, pointer shake recovery, app tips, and haunted Dock waiting. _Req: R15–R22_
 
 Rules for each implementation task:
 

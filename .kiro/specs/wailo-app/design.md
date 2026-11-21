@@ -11,6 +11,8 @@ into three implementation boundaries:
   prompt, and pure text router.
 - [Guidance and safety design](../guidance-and-safety/design.md) owns target discovery, guide visuals,
   demos, backend planning, remembered targets, warnings, and mail.
+- [Haunting v2 design](../haunting-v2/design.md) supersedes conflicting mascot, leaf, fog/cloud,
+  window-decoration, Trash, ambient-help, and Dock-target behavior with R15–R22.
 
 ```mermaid
 flowchart LR

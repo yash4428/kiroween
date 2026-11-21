@@ -14,6 +14,7 @@ The former single feature specification is split by responsibility:
 | [haunting-foundation](../haunting-foundation/requirements.md) | R1–R3, R10, R12, R13 | App shell, overlays, coordinates, haunting, ambient footprints, settings, assets, privacy |
 | [ghost-pet](../ghost-pet/requirements.md) | R4–R5 | Pet behavior, state machine, speech/prompt UI, task routing |
 | [guidance-and-safety](../guidance-and-safety/requirements.md) | R6–R9, R11 | Guided tasks, backend plans, séance/Grimoire, scam warnings, ghost mail |
+| [haunting-v2](../haunting-v2/requirements.md) | R15–R22 | Mascot redesign, pumpkin physics/bin, eligibility, shake-to-find, ambient tips, haunted Dock targets |
 
 The [pre-split critique](critique.md) records gaps, contradictions, untestable criteria, and task
 traceability fixes.
