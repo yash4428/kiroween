@@ -1,0 +1,14 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Append factual Kiro journal entry",
+      "trigger": "Stop",
+      "description": "Captures built work, Kiro capability, and one problem or lesson.",
+      "action": {
+        "type": "agent",
+        "prompt": "Before stopping, append `## <local date time>` and exactly three factual bullets to `docs/KIRO_JOURNAL.md`: what was built; which Kiro capability actually ran and how it helped; one real problem, correction, blocked permission, or lesson. Never claim unobserved hook, MCP, agent, CLI, UI, Web, or Power execution."
+      }
+    }
+  ]
+}

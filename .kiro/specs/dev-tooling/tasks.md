@@ -3,7 +3,7 @@
 - [x] 1. Reorganize steering with current inclusion modes and print every front-matter block. _Req:
   T1_
 - [x] 2. Add and test typed privacy-safe `WAILO_DEBUG` events. _Req: T3_
-- [ ] 3. Create seven current-format hooks and capture real build-repair and privacy-denial evidence.
+- [x] 3. Create seven current-format hooks and capture real build-repair and privacy-denial evidence.
   _Req: T2_
 - [ ] 4. Build, register, initialize, and list tools from the local wailo-devtools MCP server. _Req:
   T4.1–T4.4_

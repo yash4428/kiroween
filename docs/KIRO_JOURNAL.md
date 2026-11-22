@@ -18,3 +18,7 @@ Appended by the `journal` hook after each agent session. Source material for the
 - Built a typed, opt-in WAILO_DEBUG logger and instrumented tombstone, pumpkin, lantern, tip, Dock target, ghost-state, and guide-presentation events using only IDs, states, counts, and coordinates.
 - Used Kiro's spec task T3 as a privacy boundary: event payloads cannot accept arbitrary UI text, URLs, email, screenshots, or AX values.
 - Tests proved the logger is silent when disabled and emits only prefixed typed fields when enabled; `swift build` and all 34 tests passed.
+## 2026-11-22 12:41:05 IST
+- Built seven current-format Kiro hooks. The build-on-save demonstration inserted an invalid declaration in WailoDebug.swift, surfaced `expected type` / `expected initial value`, repaired only that file, and the next build passed.
+- Used the blocking privacy-guard command against the requested unsafe GhostPet payload; it exited 2 with: `PRIVACY-GUARD DENIED — privacy.md: never log screen text, AX values, window titles, URLs, emails, or pixels`. The unsafe source edit is absent.
+- Learned that hooks created during a running session report activation on the next session start, so the denial handler was also exercised directly with the same PreToolUse JSON payload. `swift build` and all 34 tests passed.

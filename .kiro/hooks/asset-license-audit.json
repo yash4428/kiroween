@@ -1,0 +1,15 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Audit newly created resource licenses",
+      "trigger": "PostFileCreate",
+      "description": "Requires source and license evidence for resources.",
+      "matcher": "app/Sources/.*/Resources/.*",
+      "action": {
+        "type": "agent",
+        "prompt": "A resource file was created. Check `assets/ASSETS.md` for a row with this file, source URL, and license. If missing, add a clearly marked TODO row and warn that distribution is blocked until verified. Do not infer or invent a license."
+      }
+    }
+  ]
+}

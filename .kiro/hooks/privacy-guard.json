@@ -1,0 +1,16 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Block privacy boundary violations",
+      "trigger": "PreToolUse",
+      "description": "Denies unsafe writes, hosts, secrets, NSApp.hide, and backend edits.",
+      "matcher": ".*",
+      "action": {
+        "type": "command",
+        "command": "python3 scripts/hooks/privacy_guard.py",
+        "timeout": 10
+      }
+    }
+  ]
+}

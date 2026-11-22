@@ -1,0 +1,15 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Build Swift after source save",
+      "trigger": "PostFileSave",
+      "description": "Builds Wailo and limits repairs to changed files.",
+      "matcher": "app/Sources/.*\\.swift$",
+      "action": {
+        "type": "agent",
+        "prompt": "A Swift source file was saved. Run `cd app && swift build 2>&1 | tail -25`. If it fails, fix compiler errors only in files changed by the current task, rerun the build, and report the result. Do not modify backend/."
+      }
+    }
+  ]
+}

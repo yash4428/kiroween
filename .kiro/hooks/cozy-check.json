@@ -1,0 +1,15 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Check Cozy interaction rules",
+      "trigger": "PostFileSave",
+      "description": "Reviews Cozy defaults, copy, text size, and Reduce Motion.",
+      "matcher": "app/Sources/Wailo/(Haunting|Pet|Guidance|Safety|Cursor)/.*",
+      "action": {
+        "type": "agent",
+        "prompt": "Review the saved UI file against `.kiro/steering/cozy-design.md`. Warn with exact file and line for Cozy flicker/lightning/pumpkins, text below 18 pt, alarming copy, decoration-only motion, or movement without a Reduce Motion alternative. Make no unrelated edits."
+      }
+    }
+  ]
+}

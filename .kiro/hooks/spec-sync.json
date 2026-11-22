@@ -1,0 +1,14 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Synchronize completed spec tasks",
+      "trigger": "PostTaskExec",
+      "description": "Updates task status and reports untested requirements.",
+      "action": {
+        "type": "agent",
+        "prompt": "A spec task completed. Tick only the exact completed task in its owning `tasks.md`. List touched requirement IDs that have no automated test; do not mark manual acceptance complete without evidence."
+      }
+    }
+  ]
+}

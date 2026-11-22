@@ -1,0 +1,15 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Test pure logic after save",
+      "trigger": "PostFileSave",
+      "description": "Runs tests for pure logic and XCTest changes.",
+      "matcher": "app/(Sources/Wailo/.*/(CoordinateSpace|FootprintPath|GhostState|TaskRouter|Grimoire|CursedURL|HauntingV2Logic)\\.swift|Tests/.*\\.swift)$",
+      "action": {
+        "type": "agent",
+        "prompt": "Pure logic or a test changed. Run `cd app && swift test 2>&1 | grep -E \"error|failed|Executed\"`. Report failures and name the requirement ID documented by the failing test or its owning spec; do not make unrelated changes."
+      }
+    }
+  ]
+}
