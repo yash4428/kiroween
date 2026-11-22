@@ -1,3 +1,7 @@
+---
+inclusion: fileMatch
+fileMatchPattern: ["**/BackendClient.swift", "**/LiveMode.swift"]
+---
 # Backend API contract (existing Waylo backend in `backend/`)
 
 The app talks to the backend over HTTP JSON at `WAILO_BACKEND_URL` (default `http://localhost:3000`).

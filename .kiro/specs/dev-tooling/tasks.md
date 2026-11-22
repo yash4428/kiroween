@@ -1,6 +1,6 @@
 # Tasks: Kiro developer tooling
 
-- [ ] 1. Reorganize steering with current inclusion modes and print every front-matter block. _Req:
+- [x] 1. Reorganize steering with current inclusion modes and print every front-matter block. _Req:
   T1_
 - [ ] 2. Add and test typed privacy-safe `WAILO_DEBUG` events. _Req: T3_
 - [ ] 3. Create seven current-format hooks and capture real build-repair and privacy-denial evidence.

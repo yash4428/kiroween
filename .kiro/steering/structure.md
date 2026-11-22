@@ -1,3 +1,6 @@
+---
+inclusion: always
+---
 # Repo structure
 
 ```

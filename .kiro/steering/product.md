@@ -1,3 +1,6 @@
+---
+inclusion: always
+---
 # Product: Wailo 👻
 
 Wailo is a Halloween ("Kiroween") macOS app built on the **Waylo** idea: a menu-bar assistant that
