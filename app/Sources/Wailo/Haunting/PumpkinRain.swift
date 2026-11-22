@@ -68,7 +68,10 @@ final class PumpkinRain {
             body.previousWindowCenter = CGPoint(x: window.frame.midX, y: window.frame.midY)
             body.center = CGPoint(x: region.minX + min(max(relativeX, 0), 1) * region.width,
                                   y: region.midY)
-            if now - since >= 8 { remove(body, animated: true) }
+            if now - since >= 8 {
+                WailoDebugLogger.shared.log(.pumpkinVanished(id: body.id, reason: .idle))
+                remove(body, animated: true)
+            }
         }
     }
 
@@ -96,7 +99,9 @@ final class PumpkinRain {
         panel.onDown = { [weak self, weak body] point in self?.beginDrag(body, at: point) }
         panel.onDrag = { [weak self, weak body] point in self?.drag(body, to: point) }
         panel.onUp = { [weak self, weak body] point in self?.endDrag(body, at: point) }
-        bodies.append(body); position(body); panel.orderFrontRegardless()
+        bodies.append(body)
+        WailoDebugLogger.shared.log(.pumpkinSpawned(id: body.id, point: center))
+        position(body); panel.orderFrontRegardless()
     }
 
     private func tick() {
@@ -122,7 +127,10 @@ final class PumpkinRain {
                 break
             case .dockIdle(let since):
                 if tryBin(body) { break }
-                if now - since >= 2 { remove(body, animated: true) }
+                if now - since >= 2 {
+                    WailoDebugLogger.shared.log(.pumpkinVanished(id: body.id, reason: .dock))
+                    remove(body, animated: true)
+                }
             case .dragging:
                 break
             case .magnetized:
@@ -147,6 +155,7 @@ final class PumpkinRain {
             let relative = (body.center.x - region.minX) / max(1, region.width)
             body.center = CGPoint(x: min(max(body.center.x, region.minX), region.maxX), y: region.midY)
             body.velocity = .zero; body.state = .landed(windowID: window.id, relativeX: relative, since: now)
+            WailoDebugLogger.shared.log(.pumpkinLanded(id: body.id, point: body.center, windowID: window.id))
             body.previousWindowCenter = CGPoint(x: window.frame.midX, y: window.frame.midY)
             return true
         }

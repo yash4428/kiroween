@@ -170,6 +170,7 @@ final class GhostPet {
     /// Sends one semantic event through the pure state machine and redraws from its result.
     func handle(_ event: GhostEvent, animated: Bool = true) {
         stateMachine.handle(event)
+        WailoDebugLogger.shared.log(.ghostStateChanged(stateMachine.visible))
         lastActivity = Date()
         renderState(animated: animated)
     }

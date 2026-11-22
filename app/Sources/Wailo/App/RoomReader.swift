@@ -39,6 +39,7 @@ final class RoomReader {
         tracker.focus(bundleID: bundleID, at: now)
         guard !isSuppressed(), tracker.shouldOffer(bundleID: bundleID, at: now) else { return }
         let name = app.localizedName ?? bundleID
+        WailoDebugLogger.shared.log(.tipOffered(bundleID: bundleID))
         onOffer(Offer(bundleID: bundleID, appName: name,
                       kind: AppTipMapper.map(bundleID: bundleID, appName: name)))
     }

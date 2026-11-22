@@ -98,6 +98,7 @@ final class TombstoneTrash {
                                                               orientation: $0.orientation) }
             ?? fallbackFrame
         binRect = target
+        WailoDebugLogger.shared.log(.tombstone(frame: target, foundInDock: location != nil))
         self.scene = scene
         root.name = "trashTombstone"
         root.zPosition = 52
@@ -124,6 +125,7 @@ final class TombstoneTrash {
     func bury(pumpkinID: UUID) {
         guard buriedPumpkins.insert(pumpkinID).inserted else { return }
         burialCount += 1
+        WailoDebugLogger.shared.log(.pumpkinBuried(total: burialCount))
         countLabel.text = "🎃 \(burialCount)"
         countLabel.removeAllActions()
         countLabel.run(.sequence([.scale(to: 1.3, duration: 0.12), .scale(to: 1, duration: 0.18)]))

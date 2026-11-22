@@ -42,6 +42,7 @@ final class ShakeToFindController {
         lantern?.removeFromParent()
         guard let overlay = overlays.overlay(containing: global) else { return }
         let local = CoordinateSpace.globalToLocal(global, screenFrame: overlay.screen.frame)
+        WailoDebugLogger.shared.log(.lanternLit(point: global))
         let root = SKNode(); root.position = local; root.zPosition = 110
         for radius in [34.0, 52.0, 72.0] {
             let ring = SKShapeNode(circleOfRadius: radius)

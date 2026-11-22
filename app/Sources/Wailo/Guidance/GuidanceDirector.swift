@@ -151,6 +151,7 @@ final class GuidanceDirector {
         let center = CGPoint(x: cocoaTarget.midX, y: cocoaTarget.midY)
         guard let overlay = overlays.overlay(containing: center) else { enterSeance(step); return }
         currentTarget = cocoaTarget; currentOverlay = overlay
+        WailoDebugLogger.shared.log(.guideStepPresented(index: index, target: cocoaTarget))
         overlays.setGuiding(true, on: overlay)
         visuals.remove()
         let local = CoordinateSpace.globalToLocal(cocoaTarget, screenFrame: overlay.screen.frame)

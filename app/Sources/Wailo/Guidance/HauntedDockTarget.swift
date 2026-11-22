@@ -35,6 +35,7 @@ final class HauntedDockTarget: GuideVisual {
         ghost.addChild(eye1); ghost.addChild(eye2); root.addChild(ghost)
 
         overlay.effectsScene.add(root, to: .guide)
+        if let bundleID { WailoDebugLogger.shared.log(.dockTargetHaunted(bundleID: bundleID)) }
         if reduceMotion { root.alpha = 0; root.run(.fadeIn(withDuration: 0.22)) }
         else {
             root.run(.repeatForever(.sequence([.rotate(toAngle: -0.07, duration: 0.17),
