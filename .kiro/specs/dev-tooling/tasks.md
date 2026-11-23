@@ -5,9 +5,9 @@
 - [x] 2. Add and test typed privacy-safe `WAILO_DEBUG` events. _Req: T3_
 - [x] 3. Create seven current-format hooks and capture real build-repair and privacy-denial evidence.
   _Req: T2_
-- [ ] 4. Build, register, initialize, and list tools from the local wailo-devtools MCP server. _Req:
+- [x] 4. Build, register, initialize, and list tools from the local wailo-devtools MCP server. _Req:
   T4.1–T4.4_
-- [ ] 5. Run the permission-available visual QA checklist and record every blocked, passed, or failed
+- [x] 5. Run the permission-available visual QA checklist and record every blocked, passed, or failed
   check without invention. _Req: T4.5_
 - [ ] 6. Create five least-privilege custom agent profiles and delegation guidance. _Req: T5.1,
   T5.3_

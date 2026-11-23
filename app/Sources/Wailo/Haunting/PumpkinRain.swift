@@ -122,6 +122,7 @@ final class PumpkinRain {
                 if tryBin(body) { break }
                 if body.center.y <= visibleFrame.minY + 12 {
                     body.center.y = visibleFrame.minY + 12; body.velocity = .zero; body.state = .dockIdle(since: now)
+                    WailoDebugLogger.shared.log(.pumpkinDocked(id: body.id, point: body.center))
                 }
             case .landed:
                 break

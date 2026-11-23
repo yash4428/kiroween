@@ -8,6 +8,7 @@ struct WailoDebugLogger {
         case tombstone(frame: CGRect, foundInDock: Bool)
         case pumpkinSpawned(id: UUID, point: CGPoint)
         case pumpkinLanded(id: UUID, point: CGPoint, windowID: CGWindowID)
+        case pumpkinDocked(id: UUID, point: CGPoint)
         case pumpkinVanished(id: UUID, reason: VanishReason)
         case pumpkinBuried(total: Int)
         case lanternLit(point: CGPoint)
@@ -41,6 +42,8 @@ struct WailoDebugLogger {
             return "pumpkin spawned id=\(id.uuidString) point=\(self.point(point))"
         case .pumpkinLanded(let id, let point, let windowID):
             return "pumpkin landed id=\(id.uuidString) point=\(self.point(point)) windowID=\(windowID)"
+        case .pumpkinDocked(let id, let point):
+            return "pumpkin docked id=\(id.uuidString) point=\(self.point(point))"
         case .pumpkinVanished(let id, let reason):
             return "pumpkin vanished id=\(id.uuidString) reason=\(reason.rawValue)"
         case .pumpkinBuried(let total):

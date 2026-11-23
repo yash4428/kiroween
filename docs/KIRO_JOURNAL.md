@@ -22,3 +22,7 @@ Appended by the `journal` hook after each agent session. Source material for the
 - Built seven current-format Kiro hooks. The build-on-save demonstration inserted an invalid declaration in WailoDebug.swift, surfaced `expected type` / `expected initial value`, repaired only that file, and the next build passed.
 - Used the blocking privacy-guard command against the requested unsafe GhostPet payload; it exited 2 with: `PRIVACY-GUARD DENIED — privacy.md: never log screen text, AX values, window titles, URLs, emails, or pixels`. The unsafe source edit is absent.
 - Learned that hooks created during a running session report activation on the next session start, so the denial handler was also exercised directly with the same PreToolUse JSON payload. `swift build` and all 34 tests passed.
+## 2026-11-23 16:07:17 IST
+- Built and registered the Node 20+ wailo-devtools MCP with 11 local tools, then ran all six QA checks and saved real screenshots, logs, timings, and CPU samples in docs/VISUAL_QA.md.
+- Used MCP launch, screenshot, Dock AX, log-tail, test-window, synthetic-drag, quit, and CPU tools; Finder QA produced one target presentation, and Cozy idle CPU averaged 0.66% across ten samples.
+- Visual QA found and fixed duplicate guide presentation, stale helper compilation, weak delegate lifetime, hover-gated drag timing, and missing Dock-arrival evidence. The final app build and all 34 tests passed; node_modules and dist remain ignored.

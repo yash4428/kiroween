@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "wailo-devtools": {
+      "command": "node",
+      "args": ["/Users/yashaggarwal/Desktop/wayloo/wailo-kiro/tools/wailo-devtools-mcp/dist/index.js"],
+      "env": {
+        "WAILO_REPO": "/Users/yashaggarwal/Desktop/wayloo/wailo-kiro",
+        "WAILO_DEVTOOLS_ALLOW_INPUT": "1"
+      },
+      "disabled": false,
+      "autoApprove": ["launch_wailo", "quit_wailo", "screenshot", "ax_dump", "dock_items", "cpu_sample", "log_tail", "grimoire_read", "backend_health", "test_window"]
+    }
+  }
+}

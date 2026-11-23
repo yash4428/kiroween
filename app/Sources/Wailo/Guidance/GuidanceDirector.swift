@@ -103,6 +103,7 @@ final class GuidanceDirector {
     }
 
     private func searchTick(_ step: GuideStep) {
+        guard currentTarget == nil else { return }
         if let bundle = step.bundleHint, !isDockQuery(step.query) {
             if frontmostBundleID?() != bundle {
                 searchStarted = Date()
@@ -147,6 +148,7 @@ final class GuidanceDirector {
     }
 
     private func present(cocoaTarget: CGRect, step: GuideStep) {
+        guard currentTarget == nil else { return }
         searchTimer?.invalidate(); searchTimer = nil
         let center = CGPoint(x: cocoaTarget.midX, y: cocoaTarget.midY)
         guard let overlay = overlays.overlay(containing: center) else { enterSeance(step); return }

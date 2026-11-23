@@ -35,7 +35,8 @@ must not modify `backend/` or weaken Wailo's privacy rules.
 ## T3. Privacy-safe debug evidence
 
 1. WHILE `WAILO_DEBUG=1` THE SYSTEM SHALL emit `NSLog` events prefixed `WAILO ` for approved states,
-   identifiers, counts, and coordinates.
+   identifiers, counts, coordinates, and lifecycle timestamps, including pumpkin Dock arrival needed
+   to verify its two-second expiry.
 2. WHILE `WAILO_DEBUG` is absent or not `1` THE SYSTEM SHALL emit no debug event.
 3. THE SYSTEM SHALL NOT put task text, UI text, AX values, window titles, URLs, email content,
    screenshots, secrets, or personal data in a debug event.

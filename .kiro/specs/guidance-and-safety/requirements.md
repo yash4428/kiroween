@@ -21,7 +21,8 @@ pet contracts. The backend in `backend/` is reused unchanged. Global quality gat
    - enter `searchingHard` and use the R13.3 vision request only when Vision fallback is enabled,
      consented, and local search has not found a target;
    - enter séance 3.4–3.8 seconds after search starts if no accepted local, remembered, or vision
-     target exists.
+     target exists;
+   - accept the first valid target once per step generation and ignore competing retry callbacks.
 3. WHEN a target is found THE SYSTEM SHALL:
    - dim only the target display with a fog spotlight whose Cozy/Spooky/Haunted opacity is
      35%/55%/60% and animate or fade open a soft hole around the target;
