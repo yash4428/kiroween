@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "spooky-macos-overlays",
+  "version": "1.0.0",
+  "description": "Safe AppKit and SpriteKit patterns for click-through, multi-monitor macOS overlays.",
+  "author": { "name": "Wailo contributors" },
+  "keywords": ["overlay", "click-through", "NSPanel", "SpriteKit overlay", "window level", "multi-monitor", "Accessibility", "AX"],
+  "repository": "https://github.com/yash4428/kiroween",
+  "license": "MIT"
+}

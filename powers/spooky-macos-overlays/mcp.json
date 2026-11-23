@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "wailo-devtools": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${WAILO_DEVTOOLS_SERVER}"],
+      "env": {
+        "WAILO_REPO": "${WAILO_APP_PATH}"
+      }
+    }
+  }
+}

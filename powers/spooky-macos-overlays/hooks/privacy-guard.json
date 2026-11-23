@@ -1,0 +1,13 @@
+{
+  "version": "v1",
+  "hooks": [{
+    "name": "Review overlay writes for privacy",
+    "trigger": "PreToolUse",
+    "matcher": ".*",
+    "description": "Template blocking hook; import explicitly and point command at a reviewed guard.",
+    "action": {
+      "type": "agent",
+      "prompt": "Before writing, deny screenshots or AX/user text being persisted or logged, external network destinations, secrets, NSApp.hide, and edits outside the user's authorized scope. Cite the applicable project privacy rule."
+    }
+  }]
+}

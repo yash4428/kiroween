@@ -1,0 +1,13 @@
+{
+  "version": "v1",
+  "hooks": [{
+    "name": "Build overlay app after Swift save",
+    "trigger": "PostFileSave",
+    "matcher": ".*Sources/.*\\.swift$",
+    "description": "Template hook; import explicitly into the workspace.",
+    "action": {
+      "type": "agent",
+      "prompt": "A Swift overlay source was saved. Run `cd ${WAILO_APP_PATH:-app} && swift build`. Fix only compiler errors introduced by the current task and rerun."
+    }
+  }]
+}

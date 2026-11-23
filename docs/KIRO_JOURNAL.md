@@ -38,3 +38,7 @@ Appended by the `journal` hook after each agent session. Source material for the
 - Built a stable seeded generator and ten 1,000-case cross-feature properties covering coordinates, bboxes, footprints, ghost safety, routing, matching, parsing, URL detection, Haunting v2 geometry, throw/bin physics, shake detection, and tip cooldown.
 - Used correctness properties from all four feature Specs as executable PBT inputs; every failure message carries seed, case index, and generated values.
 - Seed 6287387146879770662 exposed 149 exact-equality failures from sub-ULP local/global floating arithmetic, not a conversion defect. The property now uses 1e-7 tolerance and a named large-negative-origin regression; `swift build` and all 45 tests passed.
+## 2026-11-23 17:32:31 IST
+- Packaged the current Agent Plugin form of spooky-macos-overlays with plugin metadata, reusable skill, generalized references, configurable MCP, legacy POWER.md compatibility, reviewed hook templates, and local installation instructions; added macOS 14 CI.
+- Used official Kiro Power/Agent Plugin guidance and `kiro-cli powers --help`; every JSON artifact parsed successfully and installation remains a user-controlled UI/CLI action.
+- Learned that current Powers port instructions through skills and MCP, while hooks/steering are not documented portable components, so those directories are explicitly labeled templates. `swift build` and all 45 tests passed locally; remote CI status is not claimed yet.
