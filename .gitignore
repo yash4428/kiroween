@@ -5,5 +5,7 @@ app/.swiftpm/
 backend/node_modules/
 backend/.env
 backend/yolo-service/__pycache__/
+__pycache__/
+*.pyc
 backend/yolo-service/*.pt
 *.log
