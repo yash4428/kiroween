@@ -46,7 +46,17 @@ for name, new_source, expected in CASES:
     status = "PASS" if result.returncode == expected else "FAIL"
     print(f"{status}: {name} -> exit {result.returncode}")
 
+backend_payload = {
+    "toolName": "functions.fs_write",
+    "toolInput": {"path": "backend/index.js", "text": "export const safeLookingSource = true;"},
+}
+backend_result = subprocess.run([sys.executable, str(GUARD)], input=json.dumps(backend_payload), text=True,
+                                capture_output=True, cwd=ROOT)
+if backend_result.returncode != 2:
+    failures.append(f"deny full backend write: expected 2, got {backend_result.returncode}")
+print(f"{'PASS' if backend_result.returncode == 2 else 'FAIL'}: deny full backend write -> exit {backend_result.returncode}")
+
 if failures:
     print("\n".join(failures), file=sys.stderr)
     sys.exit(1)
-print(f"Executed {len(CASES)} privacy-guard cases with 0 failures")
+print(f"Executed {len(CASES) + 1} privacy-guard cases with 0 failures")

@@ -25,6 +25,7 @@ final class GuidanceDirector {
     private(set) var index = 0
     private(set) var isRunning = false
     private var generation = 0
+    private var stepGeneration = 0
     private var searchStarted = Date()
     private var searchTimer: Timer?
     private var clickTimer: Timer?
@@ -90,14 +91,15 @@ final class GuidanceDirector {
         }
         searchStarted = Date()
         let active = generation
+        let activeStep = stepGeneration
         searchTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                guard let self, self.generation == active else { return }
+                guard let self, self.generation == active, self.stepGeneration == activeStep else { return }
                 self.searchTick(step)
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            guard let self, self.generation == active else { return }
+            guard let self, self.generation == active, self.stepGeneration == activeStep else { return }
             self.searchTick(step)
         }
     }
@@ -124,10 +126,11 @@ final class GuidanceDirector {
            let screen = screenForSearch(step) {
             visionAttempted = true; ghost.handle(.escalateSearch)
             let active = generation
+            let activeStep = stepGeneration
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 let result = await visionLookup(step, screen)
-                guard self.generation == active, self.isRunning else { return }
+                guard self.generation == active, self.stepGeneration == activeStep, self.isRunning else { return }
                 if let result { self.present(cocoaTarget: result, step: step) }
                 else { self.ghost.handle(.startSearching) }
             }
@@ -171,8 +174,9 @@ final class GuidanceDirector {
         if settings.showTargetFrames { visuals.keep(DebugTargetVisual(scene: overlay.effectsScene, target: local)) }
         ghost.handle(.targetFound); ghost.say(step.instruction)
         let active = generation
+        let activeStep = stepGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
-            guard let self, self.generation == active else { return }
+            guard let self, self.generation == active, self.stepGeneration == activeStep else { return }
             self.ghost.handle(.awaitClick); self.startClickPolling(); self.startFootprintReplay(step: step)
         }
     }
@@ -213,15 +217,17 @@ final class GuidanceDirector {
     private func wrongClick() {
         guard let script, script.steps.indices.contains(index) else { return }
         ghost.handle(.clickedWrong); ghost.say("Boo… not there 🙂")
-        let active = generation, instruction = script.steps[index].instruction
+        let active = generation, activeStep = stepGeneration
+        let instruction = script.steps[index].instruction
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
-            guard let self, self.generation == active, self.isRunning else { return }
+            guard let self, self.generation == active, self.stepGeneration == activeStep, self.isRunning else { return }
             self.ghost.handle(.wrongClickRecovered); self.ghost.say(instruction)
         }
     }
 
     private func enterSeance(_ step: GuideStep) {
         searchTimer?.invalidate(); searchTimer = nil
+        stepGeneration += 1
         ghost.handle(.cannotFind)
         if let startSeance {
             startSeance(step) { [weak self] in self?.stepComplete() }
@@ -285,6 +291,7 @@ final class GuidanceDirector {
     }
 
     private func invalidateStepWork() {
+        stepGeneration += 1
         searchTimer?.invalidate(); searchTimer = nil
         clickTimer?.invalidate(); clickTimer = nil
         footprintTimer?.invalidate(); footprintTimer = nil

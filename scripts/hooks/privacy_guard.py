@@ -33,7 +33,8 @@ reasons = []
 if "backend/" in context_lower:
     mutation = any(token in raw for token in ("rm ", "mv ", "cp ", "sed -i", "tee ",
                                                "> backend", "touch ", "cat >", "write_text", "unlink("))
-    if "str_replace" in tool or "strreplace" in tool or mutation:
+    direct_write = any(token in tool for token in ("write", "str_replace", "strreplace"))
+    if direct_write or mutation:
         reasons.append("privacy.md: backend/ is read-only unless the user explicitly requests a backend change")
 
 if re.search(r"\bnsapp\s*\.\s*hide\b", raw):

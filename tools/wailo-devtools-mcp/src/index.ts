@@ -34,9 +34,11 @@ async function ensureHelper() {
   await run("swiftc", [source, "-o", helperPath], { timeout: 180_000 });
 }
 function safeHealthURL(input?: string) {
-  const raw = input ?? process.env.WAILO_BACKEND_URL ?? "http://localhost:3000";
-  const url = new URL(raw); if (!["http:", "https:"].includes(url.protocol)) throw new Error("Only HTTP(S) health URLs are allowed");
-  url.pathname = "/health"; url.search = ""; url.hash = ""; return url;
+  const configured = new URL(process.env.WAILO_BACKEND_URL ?? "http://localhost:3000");
+  const requested = new URL(input ?? configured.toString());
+  if (!["http:", "https:"].includes(requested.protocol)) throw new Error("Only HTTP(S) health URLs are allowed");
+  if (requested.origin !== configured.origin) throw new Error("Refused: health URL must match WAILO_BACKEND_URL origin");
+  requested.pathname = "/health"; requested.search = ""; requested.hash = ""; return requested;
 }
 
 const server = new McpServer({ name: "wailo-devtools", version: "1.0.0" });
@@ -102,7 +104,11 @@ server.registerTool("grimoire_read", { description: "Read the local Wailo Grimoi
 });
 
 server.registerTool("backend_health", { description: "Call GET /health on the configured Wailo backend.", inputSchema: { url: z.string().url().optional() } },
-  async ({ url }) => { const target = safeHealthURL(url); const response = await fetch(target); return text({ url: target.origin, status: response.status, body: await response.json().catch(() => null) }); });
+  async ({ url }) => {
+    const target = safeHealthURL(url); const response = await fetch(target, { redirect: "manual" });
+    if (response.status >= 300 && response.status < 400) throw new Error("Refused backend health redirect");
+    return text({ status: response.status, body: await response.json().catch(() => null) });
+  });
 
 server.registerTool("test_window", {
   description: "Show, move, or close a throwaway helper window owned by this tool.", inputSchema: { action: z.enum(["show", "glide", "jump", "close"]) }

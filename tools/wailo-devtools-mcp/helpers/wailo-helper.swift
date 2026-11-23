@@ -27,6 +27,7 @@ func axDump(bundleID: String, maxDepth: Int) {
     let root = AXUIElementCreateApplication(app.processIdentifier)
     var count = 0
     func walk(_ element: AXUIElement, _ depth: Int) -> [String: Any] {
+        guard count < 1500 else { return ["truncated": true] }
         count += 1
         let role = string(element, kAXRoleAttribute) ?? ""
         var item: [String: Any] = ["role": role]
@@ -35,11 +36,14 @@ func axDump(bundleID: String, maxDepth: Int) {
         if let f = frame(element) { item["frame"] = f }
         // Deliberately never read kAXValueAttribute, especially for text fields.
         if depth < maxDepth && count < 1500 {
-            item["children"] = children(element).prefix(max(0, 1500 - count)).map { walk($0, depth + 1) }
+            var descendants: [[String: Any]] = []
+            for child in children(element) where count < 1500 { descendants.append(walk(child, depth + 1)) }
+            item["children"] = descendants
         }
         return item
     }
-    json(["bundleId": bundleID, "nodeCount": count, "tree": walk(root, 0)])
+    let tree = walk(root, 0)
+    json(["bundleId": bundleID, "nodeCount": count, "tree": tree])
 }
 
 func dockItems() {

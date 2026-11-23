@@ -30,3 +30,7 @@ Appended by the `journal` hook after each agent session. Source material for the
 - Hardened privacy-guard property-access detection and added 18 table-driven allow/deny cases, including the exact `NSLog("%@", window.title)` regression.
 - Used the blocking hook's standalone JSON harness to verify exit 2 for `.title`, AX title/value APIs, AXValue, localizedName, URL and email values while preserving six safe edits.
 - The first run found two missed identifier forms, `AXValueGetValue` and `currentURL`; generalized patterns fixed both. The matrix, `swift build`, and all 34 app tests then passed.
+## 2026-11-23 17:15:03 IST
+- Built five V3 workspace custom-agent profiles with least-privilege tools/permissions, saved IDE fallback reports, and created a help-verified Kiro CLI review script without running it.
+- Used Kiro's custom-agent creator and two isolated IDE sub-agents for spec and privacy reviews; `kiro-cli agent list` recognized every profile as V3 format.
+- The live IDE registry could not hot-load the new names, so the reports disclose the fallback. Reviews found backend-write, AX-cap, backend-origin, logger-proof, and stale-step risks; these were fixed before `swift build` and all 35 tests passed.
