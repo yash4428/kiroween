@@ -24,13 +24,17 @@ must not modify `backend/` or weaken Wailo's privacy rules.
 2. WHEN pure logic or a test is saved THE SYSTEM SHALL invoke the configured test hook and associate
    failures with requirement IDs where available.
 3. BEFORE a file-writing tool changes protected data flow or `backend/` THE SYSTEM SHALL deny the
-   operation and explain the matching privacy rule.
+   operation and explain the matching privacy rule. WHEN a logging call references `.title`,
+   `kAXTitleAttribute`, `kAXValueAttribute`, `AXValue`, `localizedName`, URL values, or email values,
+   THE SYSTEM SHALL deny it even when no literal sensitive phrase appears.
 4. WHEN an asset is created THE SYSTEM SHALL check its source and licence record.
 5. WHEN a spec task or agent session completes THE SYSTEM SHALL synchronize tasks and append a factual
    journal entry.
 6. WHEN Cozy-sensitive UI is saved THE SYSTEM SHALL check palette, motion, copy, and Reduce Motion.
 7. WHEN hooks are demonstrated THE SYSTEM SHALL preserve a build-repair result and a privacy denial in
    the journal without leaving the deliberate bad edit in source.
+8. WHEN the privacy guard changes THE SYSTEM SHALL run at least ten allow/deny fixtures, including the
+   regression `NSLog("%@", window.title)`, and SHALL fail the test command on any wrong decision.
 
 ## T3. Privacy-safe debug evidence
 

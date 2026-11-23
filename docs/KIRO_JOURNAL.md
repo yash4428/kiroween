@@ -26,3 +26,7 @@ Appended by the `journal` hook after each agent session. Source material for the
 - Built and registered the Node 20+ wailo-devtools MCP with 11 local tools, then ran all six QA checks and saved real screenshots, logs, timings, and CPU samples in docs/VISUAL_QA.md.
 - Used MCP launch, screenshot, Dock AX, log-tail, test-window, synthetic-drag, quit, and CPU tools; Finder QA produced one target presentation, and Cozy idle CPU averaged 0.66% across ten samples.
 - Visual QA found and fixed duplicate guide presentation, stale helper compilation, weak delegate lifetime, hover-gated drag timing, and missing Dock-arrival evidence. The final app build and all 34 tests passed; node_modules and dist remain ignored.
+## 2026-11-23 16:21:35 IST
+- Hardened privacy-guard property-access detection and added 18 table-driven allow/deny cases, including the exact `NSLog("%@", window.title)` regression.
+- Used the blocking hook's standalone JSON harness to verify exit 2 for `.title`, AX title/value APIs, AXValue, localizedName, URL and email values while preserving six safe edits.
+- The first run found two missed identifier forms, `AXValueGetValue` and `currentURL`; generalized patterns fixed both. The matrix, `swift build`, and all 34 app tests then passed.
