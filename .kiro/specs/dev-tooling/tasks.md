@@ -13,6 +13,6 @@
   T5.3_
 - [x] 7. Delegate IDE privacy and spec reviews and save their reports. _Req: T5.2_
 - [x] 8. Add a help-verified Kiro CLI review script without running it. _Req: T6_
-- [ ] 9. Add seeded 1,000-case property tests and preserve every discovered regression. _Req: T7_
+- [x] 9. Add seeded 1,000-case property tests and preserve every discovered regression. _Req: T7_
 - [ ] 10. Package the local spooky-macos-overlays Power and installation instructions. _Req: T8_
 - [ ] 11. Add macOS 14 GitHub Actions build/test CI. _Req: T9_

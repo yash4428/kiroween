@@ -38,6 +38,16 @@ final class CoordinateSpaceTests: XCTestCase {
         XCTAssertEqual(CoordinateSpace.screenIndex(containing: CGPoint(x: 100, y: 1300), screenFrames: frames), 2)
     }
 
+    func testRegressionLargeNegativeOriginRoundTripUsesFloatingTolerance() {
+        let frame = CGRect(x: -663.4109272634282, y: 772.9154592081179,
+                           width: 926.7039510753508, height: 1141.7142717738134)
+        let point = CGPoint(x: 3646.433152947242, y: -1594.226593534706)
+        let local = CoordinateSpace.globalToLocal(point, screenFrame: frame)
+        let restored = CoordinateSpace.localToGlobal(local, screenFrame: frame)
+        XCTAssertEqual(restored.x, point.x, accuracy: 1e-7)
+        XCTAssertEqual(restored.y, point.y, accuracy: 1e-7)
+    }
+
     func testValidatedBboxMapping() throws {
         let screen = CGRect(x: -100, y: 200, width: 1000, height: 800)
         let rect = try XCTUnwrap(CoordinateSpace.bbox1000ToCocoa([100.0, 200.0, 500.0, 600.0], screenFrame: screen))

@@ -34,3 +34,7 @@ Appended by the `journal` hook after each agent session. Source material for the
 - Built five V3 workspace custom-agent profiles with least-privilege tools/permissions, saved IDE fallback reports, and created a help-verified Kiro CLI review script without running it.
 - Used Kiro's custom-agent creator and two isolated IDE sub-agents for spec and privacy reviews; `kiro-cli agent list` recognized every profile as V3 format.
 - The live IDE registry could not hot-load the new names, so the reports disclose the fallback. Reviews found backend-write, AX-cap, backend-origin, logger-proof, and stale-step risks; these were fixed before `swift build` and all 35 tests passed.
+## 2026-11-23 17:28:37 IST
+- Built a stable seeded generator and ten 1,000-case cross-feature properties covering coordinates, bboxes, footprints, ghost safety, routing, matching, parsing, URL detection, Haunting v2 geometry, throw/bin physics, shake detection, and tip cooldown.
+- Used correctness properties from all four feature Specs as executable PBT inputs; every failure message carries seed, case index, and generated values.
+- Seed 6287387146879770662 exposed 149 exact-equality failures from sub-ULP local/global floating arithmetic, not a conversion defect. The property now uses 1e-7 tolerance and a named large-negative-origin regression; `swift build` and all 45 tests passed.
