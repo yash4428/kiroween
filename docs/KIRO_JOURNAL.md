@@ -42,3 +42,7 @@ Appended by the `journal` hook after each agent session. Source material for the
 - Packaged the current Agent Plugin form of spooky-macos-overlays with plugin metadata, reusable skill, generalized references, configurable MCP, legacy POWER.md compatibility, reviewed hook templates, and local installation instructions; added macOS 14 CI.
 - Used official Kiro Power/Agent Plugin guidance and `kiro-cli powers --help`; every JSON artifact parsed successfully and installation remains a user-controlled UI/CLI action.
 - Learned that current Powers port instructions through skills and MCP, while hooks/steering are not documented portable components, so those directories are explicitly labeled templates. `swift build` and all 45 tests passed locally; remote CI status is not claimed yet.
+## 2026-11-23 17:44:53 IST
+- Vibe-coded Ghost Mail v2 without a spec from 17:33:02 to 17:41:25 IST: the courier waves, then the existing local letter appears with a typewriter effect.
+- Used a controlled comparison against spec-first R20 and recorded real timing, commits, files, test counts, privacy, and Reduce Motion behavior in docs/VIBE_VS_SPEC.md.
+- The first passing build missed final-text layout reservation and Reduce Motion for typewriter motion; both required rework. No dedicated Ghost Mail v2 test was added, while R20 has fixed and 1,000-case tests. Final `swift build` and all 45 tests passed.

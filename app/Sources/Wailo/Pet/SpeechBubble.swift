@@ -61,6 +61,17 @@ final class SpeechBubble {
         }
     }
 
+    func sayTypewriter(_ text: String, characterDelay: TimeInterval = 0.025) {
+        generation += 1
+        closePanel(restorePreviousApplication: false)
+        let content = TypewriterContent(text: text, characterDelay: characterDelay)
+        let newPanel = makePanel(interactive: false, keyCapable: false)
+        install(content, in: newPanel, maximumSize: CGSize(width: 460, height: 360))
+        panel = newPanel
+        if let ghostFrame = lastGhostFrame { place(newPanel, nextTo: ghostFrame, visibleFrames: lastVisibleFrames) }
+        newPanel.orderFrontRegardless()
+    }
+
     func ask(
         prompt: String,
         suggestions: [String],
@@ -223,6 +234,39 @@ private final class BubblePanel: NSPanel {
 
     override var canBecomeKey: Bool { acceptsKey }
     override var canBecomeMain: Bool { false }
+}
+
+private struct TypewriterContent: View {
+    let text: String
+    let characterDelay: TimeInterval
+    @State private var displayed = ""
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            // Reserve the final wrapped size before NSHostingView automatic sizing is disabled.
+            Text(text)
+                .font(.system(size: 19, weight: .medium, design: .rounded))
+                .fixedSize(horizontal: false, vertical: true)
+                .opacity(0)
+                .accessibilityHidden(true)
+            Text(displayed.isEmpty ? " " : displayed)
+                .font(.system(size: 19, weight: .medium, design: .rounded))
+                .foregroundStyle(Color(red: 0.13, green: 0.10, blue: 0.17))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+            .frame(maxWidth: 430, minHeight: 48, alignment: .leading)
+            .padding(20)
+            .background(Color(red: 0.98, green: 0.93, blue: 0.78), in: RoundedRectangle(cornerRadius: 22))
+            .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color(red: 0.42, green: 0.29, blue: 0.56), lineWidth: 3))
+            .task {
+                for character in text {
+                    guard !Task.isCancelled else { return }
+                    displayed.append(character)
+                    try? await Task.sleep(nanoseconds: UInt64(max(0.005, characterDelay) * 1_000_000_000))
+                }
+            }
+            .accessibilityLabel(text)
+    }
 }
 
 private struct SpeechContent: View {

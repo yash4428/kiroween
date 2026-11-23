@@ -186,6 +186,11 @@ final class GhostPet {
         bubble.say(text, style: style, actions: actions, autoHide: autoHide, centerOnScreen: centerOnScreen)
     }
 
+    func sayTypewriter(_ text: String) {
+        updateBubbleAttachment()
+        bubble.sayTypewriter(text)
+    }
+
     func openPrompt(initialText: String = "") {
         guard panel.isVisible else { return }
         handle(.startListening)

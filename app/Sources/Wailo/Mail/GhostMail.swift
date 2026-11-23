@@ -26,16 +26,28 @@ final class GhostMail {
         root.addChild(carrier); root.addChild(envelope); root.position = settings.reduceMotion ? localEnd : start
         overlay.effectsScene.add(root, to: .fx); activeNode = root
         if settings.reduceMotion {
-            root.alpha = 0; root.run(.sequence([.fadeIn(withDuration: 0.3), .wait(forDuration: 0.25), .run { [weak self] in self?.showLetter() }, .fadeOut(withDuration: 0.25), .removeFromParent()]))
+            root.alpha = 0
+            root.run(.sequence([.fadeIn(withDuration: 0.3), .wait(forDuration: 0.25),
+                                .run { [weak self] in self?.showLetter() },
+                                .fadeOut(withDuration: 0.25), .removeFromParent()]))
         } else {
             let control = CGPoint(x: (start.x + localEnd.x) / 2, y: max(start.y, localEnd.y) + 130)
             let path = CGMutablePath(); path.move(to: start); path.addQuadCurve(to: localEnd, control: control)
-            root.run(.sequence([.follow(path, asOffset: false, orientToPath: false, duration: 1.6), .run { [weak self] in self?.showLetter() }, .fadeOut(withDuration: 0.25), .removeFromParent()]))
+            let wave = SKAction.sequence([.rotate(toAngle: 0.22, duration: 0.12),
+                                          .rotate(toAngle: -0.22, duration: 0.18),
+                                          .rotate(toAngle: 0.18, duration: 0.18),
+                                          .rotate(toAngle: 0, duration: 0.12)])
+            root.run(.sequence([.follow(path, asOffset: false, orientToPath: false, duration: 1.6),
+                                .run { carrier.run(wave) }, .wait(forDuration: 0.65),
+                                .run { [weak self] in self?.showLetter() },
+                                .fadeOut(withDuration: 0.25), .removeFromParent()]))
         }
     }
 
     private func showLetter() {
         ghost.handle(.activity); WailoSound.purr.play(ifEnabled: settings)
-        ghost.say("💌 A letter from Grandson Aarav: ‘Hi Nani! Don’t forget your medicine. I’ll call you on Sunday. Love you!’")
+        let letter = "💌 A letter from Grandson Aarav: ‘Hi Nani! Don’t forget your medicine. I’ll call you on Sunday. Love you!’"
+        if settings.reduceMotion { ghost.say(letter) }
+        else { ghost.sayTypewriter(letter) }
     }
 }
