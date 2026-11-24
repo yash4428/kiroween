@@ -46,3 +46,7 @@ Appended by the `journal` hook after each agent session. Source material for the
 - Vibe-coded Ghost Mail v2 without a spec from 17:33:02 to 17:41:25 IST: the courier waves, then the existing local letter appears with a typewriter effect.
 - Used a controlled comparison against spec-first R20 and recorded real timing, commits, files, test counts, privacy, and Reduce Motion behavior in docs/VIBE_VS_SPEC.md.
 - The first passing build missed final-text layout reservation and Reduce Motion for typewriter motion; both required rework. No dedicated Ghost Mail v2 test was added, while R20 has fixed and 1,000-case tests. Final `swift build` and all 45 tests passed.
+## 2026-11-24 12:32:34 IST
+- Built the final capability evidence table and updated the contest write-up from planned tooling to verified paths, commit hashes, measurements, limitations, and manual hand-offs.
+- Used Kiro IDE, Specs, steering modes, hooks, MCP, custom-agent creation, isolated sub-agents, CLI discovery, seeded PBT, a local Power, GitHub pushes, and CI configuration with evidence linked in docs/KIRO_CAPABILITIES.md.
+- Correction: the Phase 7 journal called the suite ten generated properties; it actually contains nine 1,000-case test methods covering more than ten invariants (9,000 generated iterations). `swift build` and all 45 tests passed; two earlier remote CI runs were cancelled, not passed.

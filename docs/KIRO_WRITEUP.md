@@ -2,81 +2,55 @@
 
 ## Kiro IDE was the project’s control room
 
-We built Wailo in Kiro IDE. The IDE was where we reviewed the repository, challenged the initial
-specification, wrote the feature specs, delegated isolated implementation work, integrated the app,
-ran Swift builds and tests, audited privacy-sensitive code, and launched the finished app.
+We built Wailo in Kiro IDE. The IDE was the control room for spec critique, EARS requirements,
+designs, implementation, hook and MCP setup, custom-agent delegation, test execution, visual QA, Git
+commits, pushes, and the final write-up. Kiro could move from a requirement to its design, Swift file,
+test, runtime log, and screenshot without dropping the reason for the change.
 
-The integrated workflow mattered for a macOS overlay app because design decisions, AppKit constraints,
-visual behavior, and validation all affected one another. Kiro could move from an EARS requirement to
-the corresponding design, implementation file, and XCTest without losing the reason behind the
-change.
-
-We used the IDE’s agent tools to:
-
-- read every steering document and the complete initial spec before editing;
-- create and update files across the Swift Package;
-- run `swift build`, `swift test`, source audits, and Git diff checks;
-- delegate independent modules to focused sub-agents with non-overlapping file ownership;
-- inspect compiler and test output, fix failures, and rerun the complete suite;
-- launch Wailo as a background macOS process and verify that it stayed running.
-
-We did not use Kiro CLI, Kiro Web, or Kiro Crew for the submitted build. Terminal commands shown in the
-session ran through Kiro IDE’s tool integration, not through the Kiro CLI client. The IDE was the best
-fit for this build because the work required continuous visual and architectural context. CLI would
-be a good fit for headless review gates, Web for issue-to-PR chores, and Crew for a long-running
-performance-polish loop, but claiming those surfaces without session or PR evidence would weaken the
-submission rather than strengthen it.
+The IDE agent read steering and Specs before editing, delegated independent modules with non-overlapping
+ownership, fixed compiler/PBT failures, and ran local MCP visual checks. We also used **Kiro CLI 3.5.0**
+for authoritative `--help`, Power commands, and `agent list`; it recognized all five workspace profiles
+as V3 format. We intentionally did not run the CLI review gate because that is a hand-off step for the
+project owner. Kiro Web and Crew remain manual/optional follow-ups, so no PR or Crew result is claimed.
 
 ## Focused sub-agents accelerated the build
 
-We did not create persistent project custom-agent profiles under `.kiro/agents/`. Instead, we used
-Kiro’s focused sub-agent delegation from the IDE. This gave us the main benefit of specialist agents,
-clean context and parallel work, without inventing a custom-agent story after the fact.
+The first build used isolated Kiro sub-agents for pure logic/tests, the haunting foundation, and the
+ghost UI. Exact file ownership prevented collisions and kept `backend/` untouched.
 
-The main agent split the first implementation pass into three non-overlapping assignments:
+We then created persistent V3 custom profiles under `.kiro/agents/`:
 
-1. **Pure logic and tests:** coordinates, ghost state machine, task routing, footprint paths, backend
-   parsing, Grimoire matching/persistence, cursed-URL logic, and XCTest coverage.
-2. **Haunting foundation:** settings, asset loading, screen overlays, night sky, fog, webs, bats,
-   tombstone, tracked-window slime/leaves, haunting orchestration, and ambient footprints.
-3. **Ghost pet UI:** the procedural ghost, semantic state visuals, drag/persistence behavior,
-   body-only mouse handling, speech bubbles, and the focused prompt.
+- `spec-guardian`: read-only traceability plus narrowly allowed `swift test`;
+- `privacy-warden`: read-only data-flow audit;
+- `visual-qa`: read plus only the workspace wailo-devtools MCP;
+- `perf-ghost`: read-only process inspection plus `cpu_sample`;
+- `haunt-designer`: writes only four visual source subtrees and can delegate only to `visual-qa`.
 
-Each assignment named the exact files it could modify. That ownership boundary prevented agents from
-rewriting `Package.swift`, touching `backend/`, or colliding in shared files. All three modules reached
-Swift compilation independently; their only package-level linker issue was the intentionally
-not-yet-created app entry point. The main IDE session then integrated guidance, AX discovery, séance,
-safety, Live mode, menu actions, and global hotkeys.
+`kiro-cli agent list` verified their current format. The already-running IDE registry could not hot-load
+the new names, so we did not pretend otherwise: two isolated IDE sub-agents were given the exact
+persisted profiles as a documented fallback. Their reports in `docs/agents/` found real defects in the
+backend write guard, AX node cap, backend-health origin check, logger proof, and stale guide-step
+callbacks. We fixed those findings before the phase commit. A fresh session can invoke the named
+profiles directly.
 
-A documentation-specialist sub-agent was also used to verify official Kiro terminology for this
-write-up. That helped us distinguish custom agents from delegated sub-agents, and Kiro Powers from
-ordinary built-in tools.
+## Agent hooks automated build, test, privacy, licensing, traceability, journal, and Cozy checks
 
-The practical impact was substantial: Kiro produced 40 Swift source files while preserving module
-boundaries, and the final clean build completed without warnings. The suite finished with 32 passing
-tests and no backend changes.
+Seven current-format hooks live in `.kiro/hooks/`: build on Swift save, tests on logic/test save, a
+blocking privacy guard, asset license audit, spec synchronization, factual journal append, and Cozy UI
+review.
 
-## Agent hooks: designed, but not claimed as executed
+We exercised the workflows instead of treating configuration files as proof. A deliberate invalid
+Swift declaration produced `expected type` and `expected initial value`; only the changed file was
+repaired and the next build passed. The privacy command rejected the requested unsafe payload with
+exit 2 and the exact `PRIVACY-GUARD DENIED` reason. We later discovered that a syntactically different
+leak, `NSLog("%@", window.title)`, escaped the first phrase-based detector. That became T2.8 and an
+18-case, then 19-case, allow/deny regression harness. The current guard detects `.title`, AX title/value
+APIs, `AXValue`, `localizedName`, URL/email values, external hosts, secrets, pixel persistence,
+`NSApp.hide`, and every direct write destination under `backend/`.
 
-The repository contains a detailed hook plan in `KIRO_MASTER_PROMPT.md` and `KIRO_PLAYBOOK.md` for:
-
-- building Swift after source saves;
-- running pure-logic tests after logic/test changes;
-- rejecting privacy-sensitive writes;
-- auditing new asset licenses;
-- checking requirement/task synchronization;
-- recording a Kiro development journal;
-- checking Cozy and Reduce Motion rules.
-
-Those hooks were not configured under `.kiro/hooks/` during the submitted build, so we do not claim
-that they ran. We applied the same gates explicitly in the agent workflow: every implementation phase
-was followed by `swift build` and `swift test`, privacy-sensitive APIs were searched directly, asset
-paths were checked against `assets/ASSETS.md`, and `git diff --check` was run before completion.
-
-This was still useful design work because it identified where event-driven automation would remove
-human memory from the next iteration. A build-on-save hook and privacy pre-tool hook would be the
-first two additions: one shortens compiler feedback, while the other enforces the rule that screenshots
-exist only in memory for an explicitly enabled vision request.
+The journal records one limitation: hooks created mid-session activate at the next session start, so
+the blocking command was also exercised directly with the same PreToolUse JSON payload. This keeps
+the evidence precise rather than conflating a handler test with an IDE event.
 
 ## Spec-driven development was the biggest multiplier
 
@@ -112,12 +86,11 @@ was isolated as pure logic; the ghost state machine owned danger restoration; bo
 steps flowed through one `GuidanceDirector`; and only the vision service was allowed to handle pixels.
 Those boundaries made parallel delegation possible.
 
-Compared with vibe coding, the spec-first approach shifted effort earlier. We did not run a staged,
-measured “vibe versus spec” experiment, so we do not claim invented timing numbers. The concrete
-comparison is architectural: a vibe-coded version could make the ghost move and show Halloween art
-quickly, but it would be easy to miss menu window levels, multi-monitor coordinate flips, stale timers,
-permission-denied behavior, click-through rules, or privacy constraints. The spec made those cases
-part of “done” before animation code existed.
+We also ran a measured vibe-versus-spec experiment. Ghost Mail v2 took 8 minutes 23 seconds and
+passed its first build, but then needed two corrections: reserving final typewriter layout before
+`NSHostingView` sizing was frozen, and suppressing typewriter/wave motion under Reduce Motion. R20's
+spec-first shake detector had explicit thresholds, cleanup and suppression rules plus fixed and 1,000-case
+tests. `docs/VIBE_VS_SPEC.md` records the real timing and limitations.
 
 ## Steering turned prototype lessons into permanent guardrails
 
@@ -125,8 +98,8 @@ The four workspace steering documents had distinct jobs:
 
 - `.kiro/steering/product.md` defined the elderly-first product, cozy-spooky tone, functional use of
   every effect, stationary pet behavior, and non-goals.
-- `.kiro/steering/tech.md` defined the AppKit/SpriteKit/Core Animation/SwiftUI split, performance
-  budget, permissions, privacy, and test strategy.
+- `.kiro/steering/coordinates.md`, `windows-and-perf.md`, `privacy.md`, and `testing.md` preserve the
+  technical rules with file-matched or always-on inclusion.
 - `.kiro/steering/structure.md` defined file ownership and kept pure logic independent of AppKit.
 - `.kiro/steering/backend-api.md` treated the existing Waylo backend as a contract and explicitly
   prohibited rewriting it.
@@ -149,19 +122,23 @@ back to rendered emoji. Overlay levels are created per display. Guide callbacks 
 The normal plan request contains only `task` and `platform`. The backend directory remained untouched.
 Steering gave Kiro the kind of project memory that usually exists only in a senior developer’s head.
 
-## MCP: deliberately not part of the submitted implementation
+## MCP closed the visual verification loop
 
-We did not configure an MCP server in `.kiro/settings/mcp.json`, so we do not claim MCP usage. The
-playbook proposes a strong next step: a local `wailo-devtools` MCP with tools for launching Wailo,
-capturing local screenshots, dumping AX trees, sampling CPU, reading the Grimoire, and checking backend
-health. That would let Kiro close a visual verification loop that ordinary source inspection cannot:
-launch an auto-demo, inspect where the spider landed, compare it with the AX target, sample idle CPU,
-and iterate.
+We built `tools/wailo-devtools-mcp`, a Node 20+ stdio server using the official MCP TypeScript SDK. It
+is registered in `.kiro/settings/mcp.json`; `npm run smoke` connected through an official MCP client
+and listed eleven tools.
 
-For this submission, Kiro’s built-in file and shell tools were sufficient to build, test, audit, and
-launch the app. Avoiding a last-minute MCP also kept screen-capture scope simple and auditable. The
-existing Waylo HTTP backend is an application service, not an MCP server, and we keep that distinction
-clear.
+The MCP launched and quit Wailo, captured local `/tmp` screenshots, read bounded AX/Dock geometry,
+created and moved a safe helper window, tailed typed debug events, performed explicitly gated synthetic
+drags, sampled CPU, read the local Grimoire, and checked backend health. `docs/VISUAL_QA.md` records six
+real checks and paths. Evidence includes exact Trash/tombstone coordinate overlap, title-bar pumpkin
+movement, a synthetic burial count changing 1→2, measured expiry intervals of 8.068 s and 2.032–2.033
+s, one Finder guide target after a race fix, and ten Cozy idle CPU samples averaging 0.66%.
+
+MCP QA found issues source review missed: stale helper compilation, weak delegate lifetime, hover-gated
+input timing, missing Dock-arrival evidence, and duplicate guide presentation. Runtime artifacts stay
+under `/tmp/wailo-devtools/`; `node_modules/` and `dist/` are ignored. A privacy-agent review then
+restricted backend health to the configured origin and capped AX recursion correctly.
 
 ## Correctness properties changed both the tests and the implementation
 
@@ -181,10 +158,10 @@ property-based-testing mindset to state behavior over classes of inputs rather t
 - Backend parsing returns a typed plan, clarification, or failure for arbitrary bytes and never traps.
 - Moon position is bounded across the full day and absent during daytime.
 
-The current suite uses property-oriented XCTest loops and generated-input sweeps rather than an
-external Swift PBT dependency. One parser test feeds 256 deterministic arbitrary byte sequences.
-Geometry tests cover multiple monitor origins, tiny targets, off-screen points, malformed boxes, and
-path combinations.
+The current suite includes a stable seeded generator and nine 1,000-case XCTest properties. Failure
+messages print seed, case index, and generated values. The generated coverage spans negative/above-primary
+layouts, tiny targets, arbitrary event and byte sequences, string normalization, bbox validation,
+Haunting v2 geometry, physics, shake paths, and tip timelines.
 
 This approach exposed details that example-only UI tests could miss. During validation:
 
@@ -194,19 +171,21 @@ This approach exposed details that example-only UI tests could miss. During vali
 - Grimoire persistence exposed fractional-second loss in default ISO-8601 date encoding, so storage
   moved to fractional ISO-8601 with normalized precision.
 
-The final suite has 32 passing tests. We describe it as property-oriented coverage, not as thousands
-of randomized cases with shrinking, because the latter was not run.
+The final suite has 45 passing tests, including 9,000 deterministic generated cases. It does not claim
+a general shrinking engine; the retained named floating-point regression is the minimal observed
+counterexample.
 
-## Kiro Powers and third-party integrations
+## Kiro Powers and CI
 
-We did not install or activate a Kiro Power for the submitted build. The project playbook sketches a
-reusable `spooky-macos-overlays` Power that would bundle the NSPanel/window-level rules, coordinate
-steering, local visual-verification MCP, and build/privacy hooks. That would be valuable for a future
-macOS overlay project, but it remains a design rather than a shipped Power.
+We packaged `powers/spooky-macos-overlays` in the current Agent Plugin format with `plugin.json`, a
+reusable overlay-engineering skill, generalized coordinate/window references, configurable MCP, and a
+legacy `POWER.md` compatibility entry. Kiro's current docs do not define hooks or steering as portable
+Power components, so those folders are honestly labeled templates rather than auto-installed features.
+The Power is ready for the owner to import from the local path and capture activation evidence.
 
-Likewise, we did not use third-party GitHub, AWS, or documentation MCP integrations. Kiro’s built-in
-agent, sub-agent, file, and shell capabilities covered the implementation while the existing backend
-contract isolated cloud-provider details from the macOS app.
+No third-party MCP was needed. GitHub is used as the remote and every tooling phase was pushed. The
+macOS 14 workflow in `.github/workflows/ci.yml` runs the same `swift build` and `swift test` commands;
+remote Actions status remains separate from the locally observed pass.
 
 ## Result
 
@@ -217,8 +196,8 @@ intent to requirement, design, implementation, and validation:
 - three traceable feature specs plus global quality gates;
 - persistent steering for platform-specific failure modes;
 - scoped parallel sub-agent implementation;
-- 40 Swift source files;
-- 32 passing tests;
+- 41 Swift source files;
+- 45 passing tests, including 9,000 seeded generated cases;
 - a warning-free clean build;
 - an app launched successfully from the Kiro IDE workflow;
 - no changes to the existing backend.
